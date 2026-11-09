@@ -6,6 +6,7 @@ from urllib.parse import urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token
@@ -195,6 +196,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.delete_cookie(SESSION_COOKIE, path="/")
         response.delete_cookie(STATE_COOKIE, path="/")
         return response
+
+    # Register last so API routes take priority over the frontend at "/".
+    # An unbuilt frontend should not prevent running the backend in dev mode.
+    frontend_dist = Path(__file__).resolve().parent.parent / "client" / "dist"
+    if (frontend_dist / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
 
     return app
 
