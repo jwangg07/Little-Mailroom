@@ -19,6 +19,7 @@ SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/gmail.readonly",
 ]
 SESSION_COOKIE = "mailroom_session"
 STATE_COOKIE = "mailroom_oauth_state"

@@ -1,15 +1,120 @@
-.mailroom { min-height: 100svh; display: grid; place-items: center; padding: 32px 20px; }
-.welcome { width: 100%; max-width: 520px; text-align: center; padding: 52px 32px; background: #fffdf8; border: 1px solid #ddd9cb; border-radius: 20px; box-shadow: 0 12px 40px #3c49300a; }
-.mail-mark { display: grid; place-items: center; width: 64px; height: 64px; margin: 0 auto 28px; background: #e8eddf; color: #526b4c; border-radius: 16px; font-size: 38px; }
-.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; color: #69765f; }
-h1 { font-family: Georgia, serif; font-size: clamp(30px, 7vw, 40px); font-weight: 500; letter-spacing: -.04em; margin: 12px 0 16px; }
-.intro { color: #717468; line-height: 1.65; max-width: 350px; margin: 0 auto 30px; }
-.google-button, .secondary { display: inline-flex; align-items: center; justify-content: center; gap: 12px; padding: 13px 22px; border: 1px solid #cccfc5; border-radius: 8px; background: white; color: #343a32; text-decoration: none; font-size: 14px; font-weight: 600; cursor: pointer; }
-.google-button:hover, .secondary:hover { background: #f3f5ef; border-color: #829475; }
-.note { color: #74776c; font-size: 12px; line-height: 1.7; margin: 22px 0 0; }
-.error { padding: 14px; border-radius: 8px; background: #fff0e9; color: #94432b; font-size: 14px; line-height: 1.5; }
-.account { padding-top: 4px; }
-.status { display: inline-block; background: #e9f0e3; color: #46663d; padding: 5px 10px; border-radius: 20px; font-size: 12px; }
-h2 { margin: 18px 0 8px; font-size: 21px; overflow-wrap: anywhere; }
-.email { margin: 0; color: #717468; overflow-wrap: anywhere; }
-.secondary { margin-top: 24px; }
+.mailroom {
+    min-height: 100svh;
+    display: grid;
+    place-items: center;
+    padding: 32px 20px;
+}
+
+.welcome {
+    width: 100%;
+    max-width: 520px;
+    text-align: center;
+    padding: 52px 32px;
+    background: #fffdf8;
+    border: 1px solid #ddd9cb;
+    border-radius: 20px;
+    box-shadow: 0 12px 40px #3c49300a;
+}
+
+.mail-mark {
+    display: grid;
+    place-items: center;
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 28px;
+    background: #e8eddf;
+    color: #526b4c;
+    border-radius: 16px;
+    font-size: 38px;
+}
+
+.eyebrow {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: #69765f;
+}
+
+h1 {
+    font-family: Georgia, serif;
+    font-size: clamp(30px, 7vw, 40px);
+    font-weight: 500;
+    letter-spacing: -.04em;
+    margin: 12px 0 16px;
+}
+
+.intro {
+    color: #717468;
+    line-height: 1.65;
+    max-width: 350px;
+    margin: 0 auto 30px;
+}
+
+.google-button,
+.secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 13px 22px;
+    border: 1px solid #cccfc5;
+    border-radius: 8px;
+    background: white;
+    color: #343a32;
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.google-button:hover,
+.secondary:hover {
+    background: #f3f5ef;
+    border-color: #829475;
+}
+
+.note {
+    color: #74776c;
+    font-size: 12px;
+    line-height: 1.7;
+    margin: 22px 0 0;
+}
+
+.error {
+    padding: 14px;
+    border-radius: 8px;
+    background: #fff0e9;
+    color: #94432b;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.account {
+    padding-top: 4px;
+}
+
+.status {
+    display: inline-block;
+    background: #e9f0e3;
+    color: #46663d;
+    padding: 5px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+}
+
+h2 {
+    margin: 18px 0 8px;
+    font-size: 21px;
+    overflow-wrap: anywhere;
+}
+
+.email {
+    margin: 0;
+    color: #717468;
+    overflow-wrap: anywhere;
+}
+
+.secondary {
+    margin-top: 24px;
+}

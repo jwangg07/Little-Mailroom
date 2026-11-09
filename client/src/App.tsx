@@ -65,7 +65,7 @@ function App() {
       <section className="welcome" aria-labelledby="welcome-title">
         <div className="mail-mark" aria-hidden="true">✉</div>
         <p className="eyebrow">A little home for your inbox</p>
-        <h1 id="welcome-title">Little Mailroom</h1>
+        <h1 id="welcome-title">Mini Mailroom</h1>
         <p className="intro">Your mailroom starts here. Sign in with Google to make yourself at home.</p>
         {error && <p className="error" role="alert">{error}</p>}
         {loading ? <p role="status">Checking your account…</p> : user ? (
