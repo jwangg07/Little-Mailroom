@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:DeleteItem"],
+      "Resource": "arn:aws:dynamodb:us-east-2:965984382371:table/mini-mailroom-auth"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:us-east-2:965984382371:secret:mini-mailroom/google-client-secret-X5rGCU"
+    }
+  ]
+}

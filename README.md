@@ -4,7 +4,7 @@ A Gmail client growing into a cozy pixel-art mailroom. The first implemented
 step is Google sign-in; inbox access is next.
 
 For a walkthrough of the backend and frontend authentication code, see the
-[Google sign-in code guide](docs/OAUTH_CODE_GUIDE.md).
+[Google sign-in code guide](private/OAUTH_CODE_GUIDE.md).
 
 ## Run locally
 
@@ -18,12 +18,13 @@ Requirements: Node.js, Python 3.11+ (3.12 is the planned target), and
 2. Copy `server/.env.example` to `server/.env` if you do not already have one.
    Fill in `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI`.
    Existing `server/.env` values are loaded automatically; keep this file private.
+   For local development without AWS, explicitly set `AUTH_STORE=memory` in it.
 3. In one terminal:
 
    ```powershell
    cd server
    uv sync
-   uv run uvicorn main:app --host localhost --port 8000 --no-access-log
+   uv run python -m uvicorn main:app --host localhost --port 8000 --no-access-log
    ```
 
 4. In another terminal:
@@ -45,13 +46,37 @@ If you change the frontend URL, also set `FRONTEND_URL` in `server/.env`.
 ## Deploy to AWS without local Docker
 
 For a low-memory laptop, build the Docker image remotely with AWS CodeBuild,
-store it in Amazon ECR, and run it with ECS Express Mode on Fargate. Your laptop
+store it in Amazon ECR, and run it on AWS Lambda with Lambda Web Adapter. Your laptop
 only needs Git and a browser for deployment; Docker Desktop is optional.
 
-Follow the [cloud-build deployment guide](private/docs/AWS_DEPLOYMENT.md). The repository
-includes `buildspec.yml` to build and smoke-test the image before pushing it to
-ECR. The guide covers GitHub access, IAM permissions, runtime secrets, HTTPS,
-Google OAuth URLs, and updating the running service.
+Follow the [manual Lambda deployment checklist](private/LAMBDA_MIGRATION.md).
+The existing `Dockerfile` and `buildspec.yml` are the single Lambda build path;
+no alternate Dockerfile or buildspec is needed. CodeBuild runs backend tests and
+lint, builds React and the production image, smoke-tests frontend assets and API
+routes, then pushes a unique `lambda-<commit>-<build>` image to ECR. Updating
+Lambda to that image is a separate manual deployment step.
+
+Use a Lambda container-image function in the same region as ECR, with x86_64
+architecture, the scoped runtime role in `deploy/lambda-runtime-policy.json`,
+and a public Function URL for this same-origin prototype. No Application Load
+Balancer, VPC attachment, provisioned concurrency, or API Gateway is needed.
+The function requires `DYNAMODB_TABLE`, `GOOGLE_CLIENT_SECRET_ARN`, and
+`COOKIE_SECURE=true`. Set `GOOGLE_CLIENT_ID`, `FRONTEND_URL`, and
+`GOOGLE_REDIRECT_URI` to your matching Google client and Function URL.
+
+Keep secrets out of CodeBuild and Git. Lambda loads the `GOOGLE_CLIENT_SECRET`
+key from the Secrets Manager JSON using its execution role. The ARN is the bare
+secret ARN without the ECS `:GOOGLE_CLIENT_SECRET::` suffix. Lookups are lazy,
+cached for five minutes, and fail safely without logging provider messages.
+
+After deploying, an optional unsigned HTTP check from the project root is:
+
+```powershell
+uv run --project server python deploy/smoke_test.py https://YOUR_FUNCTION_ID.lambda-url.us-east-2.on.aws
+```
+
+This checks React assets, health, and anonymous authentication; manually test
+Google sign-in, sign-out, and session persistence as described in the checklist.
 
 ## Run with Docker locally (optional)
 
@@ -59,7 +84,7 @@ Start Docker Desktop using Linux containers. From the project root, build and ru
 
 ```powershell
 docker build -t mini-mailroom:dev .
-docker run --rm --name mini-mailroom -p 8000:8000 --env-file server/.env -e FRONTEND_URL=http://localhost:8000 -e GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback -e COOKIE_SECURE=false mini-mailroom:dev
+docker run --rm --name mini-mailroom -p 8000:8000 --env-file server/.env -e AUTH_STORE=memory -e FRONTEND_URL=http://localhost:8000 -e GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback -e COOKIE_SECURE=false mini-mailroom:dev
 ```
 
 Open **http://localhost:8000**. The image builds React and serves it through
@@ -70,27 +95,49 @@ Ensure port 8000 is free before starting the container.
 The multi-stage Dockerfile installs locked backend dependencies into a Linux
 virtual environment and runs the final container as a non-root user. Credentials
 are passed at runtime; `.env` and local environments are excluded from the build.
-Rebuild the image after changing source files. Sessions and pending sign-in
-attempts remain in memory, so restarting the container clears them.
+Rebuild the image after changing source files. In explicit local memory mode,
+restarting the container clears sessions and pending sign-in attempts.
 
-For an HTTPS deployment, set `FRONTEND_URL` and `GOOGLE_REDIRECT_URI` to the public
-HTTPS URLs, set `COOKIE_SECURE=true`, and inject the Google secret through your
-hosting service's secret manager. Configure the hosting service's health check
-to use `/health` on port 8000.
+In Lambda the adapter forwards requests to port 8000 and checks `/health` for
+readiness. Ordinary `docker run` still starts Uvicorn for local smoke testing;
+Lambda launches the adapter extension in its execution environment. Local Docker
+checks do not prove the Function URL and Google callback are configured correctly.
+
+## Shared authentication storage
+
+Authentication defaults to DynamoDB. Set `AUTH_STORE=dynamodb` and
+`DYNAMODB_TABLE=mini-mailroom-auth` in the deployed service. Create the table in
+the runtime's AWS region with a String partition key `pk`, and enable TTL on
+`expires_at`. Grant the runtime role `dynamodb:PutItem`, `dynamodb:GetItem`, and
+`dynamodb:DeleteItem` on that table. Use role credentials rather than static keys.
+
+OAuth attempts expire after ten minutes and are consumed with one conditional
+delete; sessions expire after eight hours and use consistent reads. The app
+checks expiration without waiting for DynamoDB TTL cleanup. Database failures
+return a safe HTTP 503 and never fall back to local memory.
+
+Local development can explicitly set `AUTH_STORE=memory`. Lambda rejects memory
+mode or a missing table at startup. Creating the app, `/health`, and an unsigned
+`/auth/me` request do not initialize AWS resources, allowing ordinary container
+smoke checks without credentials. `/health` is a liveness check, not an AWS
+connectivity test. Tests inject an isolated store through `create_app(..., store=...)`.
+
+Lambda also requires the secret ARN and Secure cookies at startup. Locally, a
+plain `GOOGLE_CLIENT_SECRET` from `.env` still works when no ARN is configured.
 
 ## OAuth scope and current limits
 
-This increment requests only `openid`, email, and profile. It uses Google's
+This increment requests `openid`, email, profile, and Gmail readonly. It uses Google's
 [web-server OAuth flow](https://developers.google.com/identity/protocols/oauth2/web-server)
 with PKCE, one-time browser-bound state, nonce validation, and verified ID tokens.
 The Google secret and tokens remain server-side; tokens are discarded after
 sign-in. The browser holds only an opaque HttpOnly, SameSite session cookie.
 
-Sessions last eight hours and live in memory: **restarting the backend signs users
-out**. Run one backend worker for now. Persistent encrypted Gmail credentials,
-refresh, disconnect/revocation, and mail reading remain subsequent Phase 1 work.
+Sessions last eight hours and persist across backend instances when DynamoDB is
+configured. Persistent encrypted Gmail credentials, refresh,
+disconnect/revocation, and mail reading remain subsequent Phase 1 work.
 Sign out does not revoke the Google consent grant. This is a local prototype;
-deployment will require HTTPS, `COOKIE_SECURE=true`, shared persistent sessions,
+deployment requires HTTPS, `COOKIE_SECURE=true`, configured DynamoDB storage,
 and the appropriate production proxy configuration.
 
 Run without access logs so callback query strings containing authorization codes
@@ -101,7 +148,8 @@ are not written to logs. No OAuth credentials belong in frontend environment fil
 ```powershell
 cd server
 uv run pytest
-uv run ruff check main.py tests
+uv run ruff check main.py auth_store.py google_secret.py tests
+uv run ruff format --check main.py auth_store.py google_secret.py tests
 ```
 
 ```powershell

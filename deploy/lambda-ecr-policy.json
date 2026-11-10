@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "MiniMailroomLambdaImagePull",
+      "Effect": "Allow",
+      "Principal": {"Service": "lambda.amazonaws.com"},
+      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+      "Condition": {
+        "ArnLike": {"aws:SourceArn": "arn:aws:lambda:us-east-2:965984382371:function:mini-mailroom-lambda"}
+      }
+    }
+  ]
+}

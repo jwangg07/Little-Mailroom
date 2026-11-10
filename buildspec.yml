@@ -12,14 +12,21 @@ phases:
         set -euo pipefail
         : "${AWS_ACCOUNT_ID:?Set AWS_ACCOUNT_ID in the CodeBuild project}"
         : "${AWS_DEFAULT_REGION:?AWS_DEFAULT_REGION must be set}"
+        BUILD_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        if [ "$AWS_ACCOUNT_ID" != "$BUILD_ACCOUNT_ID" ]; then
+          echo 'AWS_ACCOUNT_ID must match the CodeBuild account for this single-account deployment.' >&2
+          exit 1
+        fi
         export REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-        export IMAGE_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:0:12}-${CODEBUILD_BUILD_NUMBER}"
+        export IMAGE_TAG="lambda-${CODEBUILD_RESOLVED_SOURCE_VERSION:0:12}-${CODEBUILD_BUILD_NUMBER}"
         export IMAGE_URI="${REGISTRY}/${IMAGE_REPO_NAME}:${IMAGE_TAG}"
         aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
   build:
     commands:
       - |
         set -euo pipefail
+        docker build --platform linux/amd64 --target test --tag mini-mailroom-tests .
+        docker run --rm mini-mailroom-tests
         docker build --platform linux/amd64 --tag "$IMAGE_URI" .
         trap 'docker rm -f mailroom-smoke >/dev/null 2>&1 || true' EXIT
         docker run --detach --name mailroom-smoke "$IMAGE_URI"
@@ -35,11 +42,11 @@ phases:
           docker logs mailroom-smoke
           exit 1
         fi
-        docker exec mailroom-smoke python -c "import json, urllib.request; base='http://127.0.0.1:8000'; page=urllib.request.urlopen(base+'/'); assert 'text/html' in page.headers['Content-Type']; assert b'<div id=\"root\">' in page.read(); assert json.load(urllib.request.urlopen(base+'/auth/me')) == {'user': None}; assert json.load(urllib.request.urlopen(base+'/health')) == {'status': 'ok'}"
+        docker exec -i mailroom-smoke python - < deploy/smoke_test.py
   post_build:
     commands:
       - |
         set -euo pipefail
         test "$CODEBUILD_BUILD_SUCCEEDING" = "1"
         docker push "$IMAGE_URI"
-        printf 'Image ready for deployment: %s\n' "$IMAGE_URI"
+        printf 'Image ready for Lambda deployment: %s\n' "$IMAGE_URI"

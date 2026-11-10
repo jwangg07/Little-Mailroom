@@ -5,7 +5,7 @@ WORKDIR /build/client
 COPY client/package.json client/package-lock.json ./
 RUN npm ci
 COPY client/ ./
-RUN npm run build
+RUN npm run build && npm run lint
 
 FROM python:3.12-slim-bookworm AS backend-build
 COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
@@ -15,15 +15,27 @@ COPY server/pyproject.toml server/uv.lock ./
 # main.py runs directly; the scaffolded "server" package isn't needed.
 RUN uv sync --locked --no-dev --no-install-project --python /usr/local/bin/python
 
+FROM backend-build AS test
+RUN uv sync --locked --no-install-project --python /usr/local/bin/python
+ENV PATH="/app/server/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1
+COPY server/main.py server/auth_store.py server/google_secret.py ./
+COPY server/tests/ ./tests/
+CMD ["sh", "-c", "python -m pytest tests -q && ruff check main.py auth_store.py google_secret.py tests && ruff format --check main.py auth_store.py google_secret.py tests"]
+
 FROM python:3.12-slim-bookworm AS runtime
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.1.0 /lambda-adapter /opt/extensions/lambda-adapter
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/server/.venv/bin:$PATH"
+    PATH="/app/server/.venv/bin:$PATH" \
+    AWS_LWA_PORT=8000 \
+    AWS_LWA_READINESS_CHECK_PATH=/health \
+    AWS_LWA_READINESS_CHECK_HEALTHY_STATUS=200 \
+    AWS_LWA_ASYNC_INIT=true
 RUN groupadd --gid 10001 mailroom \
     && useradd --uid 10001 --gid mailroom --no-create-home mailroom
 WORKDIR /app/server
 COPY --from=backend-build /app/server/.venv /app/server/.venv
-COPY server/main.py ./main.py
+COPY server/main.py server/auth_store.py server/google_secret.py ./
 COPY --from=frontend-build /build/client/dist /app/client/dist
 USER 10001:10001
 EXPOSE 8000
