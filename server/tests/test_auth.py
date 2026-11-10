@@ -5,9 +5,12 @@ from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 
 import main
+from auth_store import DynamoDBAuthStore, MemoryAuthStore
+from google_secret import SecretUnavailableError
 
 
 @pytest.fixture
@@ -17,7 +20,9 @@ def client():
         google_client_id="test-client.apps.googleusercontent.com",
         google_client_secret="test-secret",
     )
-    with TestClient(main.create_app(settings), follow_redirects=False) as client:
+    with TestClient(
+        main.create_app(settings, store=MemoryAuthStore()), follow_redirects=False
+    ) as client:
         yield client
 
 
@@ -50,12 +55,12 @@ def complete_login(client, monkeypatch, *, claims_override=None):
     return response, params, flow
 
 
-def test_authorization_uses_identity_scopes_pkce_and_private_cookie(client):
+def test_authorization_uses_configured_scopes_pkce_and_private_cookie(client):
     response = client.get("/auth/google/login")
     params = parse_qs(urlsplit(response.headers["location"]).query)
     assert params["redirect_uri"] == ["http://localhost:8000/auth/google/callback"]
     assert params["code_challenge_method"] == ["S256"]
-    assert "gmail" not in params["scope"][0]
+    assert set(params["scope"][0].split()) == set(main.SCOPES)
     assert params["nonce"] and params["state"]
     assert "test-secret" not in response.headers["location"]
     assert "HttpOnly" in response.headers["set-cookie"]
@@ -137,7 +142,7 @@ def test_invalid_identity_does_not_create_session(client, monkeypatch, claims):
     assert client.get("/auth/me").json() == {"user": None}
 
 
-def test_provider_failure_does_not_expose_secrets(client, monkeypatch):
+def test_provider_failure_does_not_expose_secrets(client, monkeypatch, caplog):
     params = start_login(client)
     monkeypatch.setattr(
         main.Flow, "fetch_token", Mock(side_effect=ValueError("private-token"))
@@ -151,6 +156,8 @@ def test_provider_failure_does_not_expose_secrets(client, monkeypatch):
     )
     assert "failed" in response.headers["location"]
     assert "private-token" not in response.text + str(response.headers)
+    assert "private-token" not in caplog.text
+    assert "stage=token_exchange exception_type=ValueError" in caplog.text
     assert client.get("/auth/me").json() == {"user": None}
 
 
@@ -185,3 +192,233 @@ def test_expired_session(client, monkeypatch):
     now = main.time.time()
     monkeypatch.setattr(main.time, "time", lambda: now + main.SESSION_TTL + 1)
     assert client.get("/auth/me").json() == {"user": None}
+
+
+def test_smoke_routes_do_not_initialize_aws(monkeypatch):
+    factory = Mock(side_effect=AssertionError("AWS initialization attempted"))
+    monkeypatch.setattr("auth_store.boto3.session.Session", factory)
+    app = main.create_app(
+        main.Settings(
+            _env_file=None,
+            dynamodb_table="auth-table",
+            google_client_secret_arn="arn:test",
+            cookie_secure=True,
+        )
+    )
+    with TestClient(app) as browser:
+        assert browser.get("/health").json() == {"status": "ok"}
+        assert browser.get("/auth/me").json() == {"user": None}
+    factory.assert_not_called()
+
+
+def test_shared_store_survives_app_replacement_and_logout(monkeypatch):
+    store = MemoryAuthStore()
+    settings = main.Settings(
+        _env_file=None,
+        google_client_id="test-client.apps.googleusercontent.com",
+        google_client_secret="test-secret",
+    )
+    first_app = main.create_app(settings, store=store)
+    second_app = main.create_app(settings, store=store)
+    with TestClient(first_app, follow_redirects=False) as first:
+        params = start_login(first)
+        flow = Mock(credentials=SimpleNamespace(id_token="private-id-token"))
+        monkeypatch.setattr(main.Flow, "from_client_config", Mock(return_value=flow))
+        monkeypatch.setattr(
+            main.id_token,
+            "verify_oauth2_token",
+            Mock(
+                return_value={
+                    "sub": "user",
+                    "email": "user@example.com",
+                    "name": "User",
+                    "nonce": params["nonce"][0],
+                    "email_verified": True,
+                }
+            ),
+        )
+        with TestClient(second_app, follow_redirects=False) as second:
+            second.cookies.update(first.cookies)
+            result = second.get(
+                "/auth/google/callback",
+                params={"state": params["state"][0], "code": "test-code"},
+            )
+            assert "auth_error" not in result.headers["location"]
+            first.cookies.update(second.cookies)
+            assert first.get("/auth/me").json()["user"]["id"] == "user"
+            assert (
+                second.post(
+                    "/auth/logout", headers={"X-Mailroom-Request": "1"}
+                ).status_code
+                == 200
+            )
+            assert first.get("/auth/me").json() == {"user": None}
+
+
+def test_storage_failure_returns_safe_503_without_fallback(monkeypatch, caplog):
+    table = Mock()
+    store = DynamoDBAuthStore("auth-table")
+    monkeypatch.setattr(store, "_table", lambda: table)
+    table.get_item.side_effect = ClientError(
+        {
+            "Error": {
+                "Code": "AccessDeniedException",
+                "Message": "private-provider-data",
+            }
+        },
+        "GetItem",
+    )
+    with TestClient(
+        main.create_app(main.Settings(_env_file=None), store=store)
+    ) as browser:
+        browser.cookies.set(main.SESSION_COOKIE, "private-session")
+        response = browser.get("/auth/me")
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert "private-provider-data" not in response.text + caplog.text
+    assert "private-session" not in caplog.text
+    assert all(
+        record.exc_info is None for record in caplog.records if record.name == "main"
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"auth_store": "memory", "dynamodb_table": "auth-table"},
+        {"dynamodb_table": ""},
+    ],
+)
+def test_lambda_rejects_memory_or_missing_table(monkeypatch, settings):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "mini-mailroom")
+    with pytest.raises(RuntimeError, match="Lambda requires"):
+        main.create_app(main.Settings(_env_file=None, **settings))
+
+
+def test_lambda_configures_dynamodb_lazily(monkeypatch):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "mini-mailroom")
+    factory = Mock(side_effect=AssertionError("AWS initialization attempted"))
+    monkeypatch.setattr("auth_store.boto3.session.Session", factory)
+    app = main.create_app(
+        main.Settings(
+            _env_file=None,
+            dynamodb_table="auth-table",
+            google_client_secret_arn="arn:test",
+            cookie_secure=True,
+        )
+    )
+    with TestClient(app) as browser:
+        assert browser.get("/health").status_code == 200
+    factory.assert_not_called()
+
+
+def test_mismatched_cookie_never_consumes_oauth(monkeypatch):
+    store = Mock()
+    with TestClient(
+        main.create_app(main.Settings(_env_file=None), store=store),
+        follow_redirects=False,
+    ) as browser:
+        browser.cookies.set(main.STATE_COOKIE, "browser-state")
+        response = browser.get(
+            "/auth/google/callback",
+            params={"state": "other-state", "code": "private-code"},
+        )
+    assert "invalid_state" in response.headers["location"]
+    store.consume_oauth.assert_not_called()
+
+
+def test_new_login_revokes_previous_session(client, monkeypatch):
+    complete_login(client, monkeypatch)
+    old_id = client.cookies.get(main.SESSION_COOKIE)
+    # Let the second login generate a fresh real authorization URL.
+    monkeypatch.undo()
+    complete_login(client, monkeypatch)
+    assert client.cookies.get(main.SESSION_COOKIE) != old_id
+    with TestClient(client.app) as old_browser:
+        old_browser.cookies.set(main.SESSION_COOKIE, old_id)
+        assert old_browser.get("/auth/me").json() == {"user": None}
+
+
+def test_deployed_cookie_flags(monkeypatch):
+    settings = main.Settings(
+        _env_file=None,
+        cookie_secure=True,
+        frontend_url="https://mailroom.example",
+        google_redirect_uri="https://mailroom.example/auth/google/callback",
+        google_client_id="test-client.apps.googleusercontent.com",
+        google_client_secret="test-secret",
+    )
+    with TestClient(
+        main.create_app(settings, store=MemoryAuthStore()),
+        base_url="https://mailroom.example",
+        follow_redirects=False,
+    ) as browser:
+        response, _, _ = complete_login(browser, monkeypatch)
+        cookie = next(
+            value
+            for value in response.headers.get_list("set-cookie")
+            if value.startswith(main.SESSION_COOKIE + "=")
+        )
+        assert all(flag in cookie for flag in ["HttpOnly", "SameSite=lax", "Secure"])
+
+
+def test_secret_arn_is_lazy_and_supplies_extracted_value(monkeypatch):
+    settings = main.Settings(
+        _env_file=None,
+        google_client_id="test-client.apps.googleusercontent.com",
+        google_client_secret_arn="arn:test",
+    )
+    getter = Mock(return_value="aws-secret-value")
+    monkeypatch.setattr(main.GoogleClientSecret, "get", getter)
+    flow_factory = Mock(wraps=main.Flow.from_client_config)
+    monkeypatch.setattr(main.Flow, "from_client_config", flow_factory)
+    with TestClient(
+        main.create_app(settings, store=MemoryAuthStore()), follow_redirects=False
+    ) as browser:
+        assert browser.get("/health").status_code == 200
+        assert browser.get("/auth/me").json() == {"user": None}
+        getter.assert_not_called()
+        start_login(browser)
+    assert flow_factory.call_args.args[0]["web"]["client_secret"] == "aws-secret-value"
+
+
+def test_secret_lookup_failure_does_not_start_login(monkeypatch, caplog):
+    settings = main.Settings(
+        _env_file=None,
+        google_client_id="test-client.apps.googleusercontent.com",
+        google_client_secret_arn="arn:test",
+    )
+    store = Mock()
+    monkeypatch.setattr(
+        main.GoogleClientSecret,
+        "get",
+        Mock(side_effect=SecretUnavailableError("Google credentials unavailable")),
+    )
+    with TestClient(
+        main.create_app(settings, store=store), follow_redirects=False
+    ) as browser:
+        response = browser.get("/auth/google/login")
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert "Google credential lookup unavailable" in caplog.text
+    store.save_oauth.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"google_client_secret_arn": ""},
+        {"cookie_secure": False},
+    ],
+)
+def test_lambda_requires_secret_arn_and_secure_cookies(monkeypatch, overrides):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "mini-mailroom")
+    fields = {
+        "_env_file": None,
+        "dynamodb_table": "auth-table",
+        "google_client_secret_arn": "arn:test",
+        "cookie_secure": True,
+    }
+    fields.update(overrides)
+    with pytest.raises(RuntimeError, match="Lambda requires GOOGLE_CLIENT_SECRET_ARN"):
+        main.create_app(main.Settings(**fields))

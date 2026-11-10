@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11.1"
 dependencies = [
+    "boto3>=1.43.127",
     "fastapi[standard]>=0.162.0",
     "google-auth-oauthlib>=1.2.2,<2",
     "pydantic-settings>=2.16.2",
