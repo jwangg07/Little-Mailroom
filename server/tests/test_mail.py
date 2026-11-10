@@ -1,0 +1,239 @@
+"""Credential lifecycle and Gmail routes using fake Google/AWS boundaries."""
+
+import base64
+import json
+import time
+from datetime import UTC, datetime, timedelta
+from email import policy
+from email.parser import BytesParser
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+import requests
+from botocore.exceptions import ClientError
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from google.auth.exceptions import RefreshError
+
+from auth_store import AuthStoreError, DynamoDBAuthStore, MemoryAuthStore, Session
+from credential_vault import CredentialVault
+from gmail_service import PREFIX, GmailService
+from main import Settings, create_app
+from security import SESSION_COOKIE
+
+
+def credential(**overrides):
+    fields = dict(token="access-secret", refresh_token="refresh-secret", id_token="id-secret",
+                  expiry=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1),
+                  scopes=[PREFIX + "modify"], granted_scopes=None)
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+@pytest.fixture
+def setup(monkeypatch):
+    store, vault = MemoryAuthStore(), CredentialVault()
+    service = GmailService(store, vault, "client", lambda: "client-secret")
+    service.capture("alice", credential())
+    session = Mock()
+    session.__enter__ = Mock(return_value=session)
+    session.__exit__ = Mock(return_value=False)
+    session.request.return_value = Mock(status_code=200, ok=True, json=lambda: {"id": "abc123"})
+    monkeypatch.setattr("gmail_service.requests.Session", lambda: session)
+    return store, vault, service, session
+
+
+def test_vault_ciphertext_is_random_and_bound_to_user():
+    vault = CredentialVault()
+    data = {"token": "access-secret", "refresh_token": "refresh-secret"}
+    encrypted = vault.encrypt("alice", data)
+    assert "access-secret" not in encrypted and "refresh-secret" not in encrypted
+    assert vault.encrypt("alice", data) != encrypted
+    assert vault.decrypt("alice", encrypted) == data
+    with pytest.raises(AuthStoreError):
+        vault.decrypt("bob", encrypted)
+    damaged = json.loads(encrypted)
+    damaged["ciphertext"] = base64.b64encode(b"tampered").decode()
+    with pytest.raises(AuthStoreError):
+        vault.decrypt("alice", json.dumps(damaged))
+
+
+def test_kms_envelope_uses_context_and_handles_large_tokens(monkeypatch):
+    kms = Mock()
+    key = b"a" * 32
+    kms.generate_data_key.return_value = {"Plaintext": key, "CiphertextBlob": b"wrapped-key"}
+    kms.decrypt.return_value = {"Plaintext": key}
+    vault = CredentialVault("arn:kms:key")
+    monkeypatch.setattr(vault, "_kms", lambda: kms)
+    data = {"token": "x" * 8000}
+    encrypted = vault.encrypt("alice", data)
+    assert vault.decrypt("alice", encrypted) == data
+    assert kms.generate_data_key.call_args.kwargs["EncryptionContext"] == {"app": "mini-mailroom", "user_id": "alice"}
+    assert kms.decrypt.call_args.kwargs["KeyId"] == "arn:kms:key"
+    kms.decrypt.side_effect = ClientError({"Error": {"Code": "AccessDenied", "Message": "secret"}}, "Decrypt")
+    with pytest.raises(AuthStoreError, match="Credential decryption unavailable"):
+        vault.decrypt("alice", encrypted)
+
+
+def test_capture_preserves_refresh_token_and_tracks_actual_scopes(setup):
+    store, vault, service, _ = setup
+    service.capture("alice", credential(refresh_token=None, granted_scopes=[PREFIX + "readonly"]))
+    stored = store.read_credentials("alice")
+    assert "refresh-secret" not in stored
+    data = vault.decrypt("alice", stored)
+    assert data["refresh_token"] == "refresh-secret"
+    assert data["scopes"] == [PREFIX + "readonly"]
+    with pytest.raises(HTTPException) as exc:
+        service.send("alice", "alice@example.com", "bob@example.com", "Hi", "Body")
+    assert exc.value.status_code == 409
+
+
+def test_dynamodb_credentials_have_no_session_ttl_and_conditional_refresh(monkeypatch):
+    store = DynamoDBAuthStore("table")
+    table = Mock()
+    monkeypatch.setattr(store, "_table", lambda: table)
+    store.save_credentials("alice", "encrypted")
+    assert table.put_item.call_args.kwargs["Item"] == {"pk": "credentials#alice", "encrypted": "encrypted"}
+    table.get_item.return_value = {"Item": {"encrypted": "encrypted"}}
+    assert store.read_credentials("alice") == "encrypted"
+    assert table.get_item.call_args.kwargs["ConsistentRead"]
+    assert store.replace_credentials("alice", "encrypted", "new")
+    assert table.put_item.call_args.kwargs["ConditionExpression"] == "encrypted = :old"
+    table.put_item.side_effect = ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "PutItem")
+    assert not store.replace_credentials("alice", "old", "new")
+
+
+def test_automatic_refresh_is_persisted_before_gmail_call(setup, monkeypatch):
+    store, vault, service, session = setup
+    service.capture("alice", credential(expiry=datetime(2000, 1, 1)))
+    def refresh(credentials, request):
+        credentials.token = "new-access"
+        credentials.expiry = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+    mock = Mock(side_effect=refresh)
+    monkeypatch.setattr("gmail_service.Credentials.refresh", lambda self, request: mock(self, request))
+    service.request("alice", "GET", "/messages")
+    assert mock.call_count == 1
+    assert session.request.call_args.kwargs["headers"]["Authorization"] == "Bearer new-access"
+    assert vault.decrypt("alice", store.read_credentials("alice"))["token"] == "new-access"
+    service.request("alice", "GET", "/messages")
+    assert mock.call_count == 1
+
+
+def test_refresh_does_not_overwrite_new_login(setup, monkeypatch):
+    store, vault, service, session = setup
+    service.capture("alice", credential(expiry=datetime(2000, 1, 1)))
+    def refresh(credentials, request):
+        service.capture("alice", credential(token="new-login", refresh_token="new-grant"))
+        credentials.token = "stale-refresh"
+        credentials.expiry = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+    monkeypatch.setattr("gmail_service.Credentials.refresh", refresh)
+    service.request("alice", "GET", "/messages")
+    assert session.request.call_args.kwargs["headers"]["Authorization"] == "Bearer new-login"
+    assert vault.decrypt("alice", store.read_credentials("alice"))["refresh_token"] == "new-grant"
+
+
+@pytest.mark.parametrize("retryable,status", [(False, 409), (True, 503)])
+def test_failed_refresh_never_calls_gmail_or_leaks_provider_text(setup, monkeypatch, retryable, status):
+    _, _, service, session = setup
+    service.capture("alice", credential(expiry=datetime(2000, 1, 1)))
+    monkeypatch.setattr("gmail_service.Credentials.refresh", Mock(side_effect=RefreshError("private-token", retryable=retryable)))
+    with pytest.raises(HTTPException) as exc:
+        service.request("alice", "GET", "/messages")
+    assert exc.value.status_code == status
+    assert "private-token" not in exc.value.detail
+    session.request.assert_not_called()
+
+
+def test_401_refreshes_and_retries_once(setup, monkeypatch):
+    _, _, service, session = setup
+    session.request.side_effect = [Mock(status_code=401), Mock(status_code=401)]
+    def refresh(credentials, request):
+        credentials.token = "renewed"
+        credentials.expiry = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+    mock = Mock(side_effect=refresh)
+    monkeypatch.setattr("gmail_service.Credentials.refresh", lambda self, request: mock(self, request))
+    with pytest.raises(HTTPException) as exc:
+        service.request("alice", "GET", "/messages")
+    assert exc.value.status_code == 409
+    assert session.request.call_count == 2 and mock.call_count == 1
+
+
+def test_send_creates_mime_and_never_retries_timeout(setup):
+    _, _, service, session = setup
+    service.send("alice", "alice@example.com", "bob@example.com", "Hello ☀", "A letter.")
+    call = session.request.call_args
+    raw = call.kwargs["json"]["raw"]
+    message = BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(raw))
+    assert message["From"] == "alice@example.com" and message["To"] == "bob@example.com"
+    assert message["Subject"] == "Hello ☀" and message.get_content().strip() == "A letter."
+    session.request.reset_mock()
+    session.request.side_effect = requests.Timeout("access-secret")
+    with pytest.raises(HTTPException, match="") as exc:
+        service.send("alice", "alice@example.com", "bob@example.com", "Hi", "Body")
+    assert "Check Sent" in exc.value.detail and session.request.call_count == 1
+
+
+def test_read_plain_text_not_html_and_list_pagination(setup):
+    _, _, service, session = setup
+    raw = b"From: sender@example.com\r\nSubject: Hi\r\nContent-Type: multipart/alternative; boundary=x\r\n\r\n--x\r\nContent-Type: text/plain\r\n\r\nSafe text\r\n--x\r\nContent-Type: text/html\r\n\r\n<script>bad()</script>\r\n--x--"
+    session.request.return_value.json.return_value = {}  # replaced below with real response
+    session.request.return_value = Mock(status_code=200, ok=True, json=lambda: {"id": "abc", "raw": base64.urlsafe_b64encode(raw).decode().rstrip("=")})
+    assert service.message("alice", "abc")["body"].strip() == "Safe text"
+    session.request.side_effect = [
+        Mock(status_code=200, ok=True, json=lambda: {"messages": [{"id": "abc"}], "nextPageToken": "next"}),
+        Mock(status_code=200, ok=True, json=lambda: {"id": "abc", "labelIds": ["UNREAD"], "payload": {"headers": [{"name": "Subject", "value": "Hello"}]}}),
+    ]
+    page = service.inbox("alice", "older")
+    assert page["nextPageToken"] == "next" and page["messages"][0]["unread"]
+    assert session.request.call_args_list[-2].kwargs["params"]["pageToken"] == "older"
+
+
+def test_mail_routes_authenticate_scope_user_and_protect_send(monkeypatch):
+    store = MemoryAuthStore()
+    store.save_session("session", Session({"id": "alice", "email": "alice@example.com"}, int(time.time()) + 600))
+    app = create_app(Settings(_env_file=None), store=store)
+    fake = Mock()
+    fake.inbox.return_value = {"messages": [], "nextPageToken": None}
+    fake.message.return_value = {"id": "abc"}
+    fake.send.return_value = {"id": "sent"}
+    monkeypatch.setattr(GmailService, "inbox", fake.inbox)
+    monkeypatch.setattr(GmailService, "message", fake.message)
+    monkeypatch.setattr(GmailService, "send", fake.send)
+    with TestClient(app) as client:
+        assert client.get("/api/mail/messages").status_code == 401
+        client.cookies.set(SESSION_COOKIE, "session")
+        response = client.get("/api/mail/messages?page_token=next")
+        assert response.status_code == 200 and response.headers["Cache-Control"] == "no-store"
+        fake.inbox.assert_called_once_with("alice", "next")
+        assert client.get("/api/mail/messages/abc").status_code == 200
+        fake.message.assert_called_once_with("alice", "abc")
+        payload = {"to": "bob@example.com", "subject": "Hi", "body": "Body"}
+        assert client.post("/api/mail/send", json=payload).status_code == 403
+        assert client.post("/api/mail/send", json=payload, headers={"X-Mailroom-Request": "1", "Origin": "https://evil.example"}).status_code == 403
+        assert client.post("/api/mail/send", json={**payload, "subject": "Hi\r\nBcc: attacker@example.com"}, headers={"X-Mailroom-Request": "1"}).status_code == 422
+        assert client.post("/api/mail/send", json=payload, headers={"X-Mailroom-Request": "1"}).status_code == 200
+        fake.send.assert_called_once_with("alice", "alice@example.com", "bob@example.com", "Hi", "Body")
+
+
+def test_credentials_are_not_shared_between_users(setup):
+    _, _, service, session = setup
+    with pytest.raises(HTTPException) as exc:
+        service.request("bob", "GET", "/messages")
+    assert exc.value.status_code == 409
+    session.request.assert_not_called()
+
+
+def test_missing_refresh_token_requires_reconnect(setup):
+    store, vault, service, session = setup
+    store.save_credentials("alice", vault.encrypt("alice", {"token": "old", "refresh_token": None, "expiry": None, "scopes": [PREFIX + "modify"]}))
+    with pytest.raises(HTTPException) as exc:
+        service.request("alice", "GET", "/messages")
+    assert exc.value.status_code == 409
+    session.request.assert_not_called()
+
+
+def test_lambda_requires_kms(monkeypatch):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "mailroom")
+    with pytest.raises(RuntimeError, match="CREDENTIAL_KMS_KEY_ID"):
+        create_app(Settings(_env_file=None, dynamodb_table="auth", google_client_secret_arn="arn:secret", cookie_secure=True))

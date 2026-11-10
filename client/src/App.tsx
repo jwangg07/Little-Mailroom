@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import './App.css'
+import Mailbox from './components/Mailbox'
 
 type User = { id: string; name: string; email: string }
 
@@ -66,14 +67,13 @@ function App() {
         <div className="mail-mark" aria-hidden="true">✉</div>
         <p className="eyebrow">A little home for your inbox</p>
         <h1 id="welcome-title">Mini Mailroom</h1>
-        <p className="intro">Your mailroom starts here. Sign in with Google to make yourself at home.</p>
+        <p className="intro">A quiet place to read your inbox and write your next letter.</p>
         {error && <p className="error" role="alert">{error}</p>}
         {loading ? <p role="status">Checking your account…</p> : user ? (
           <div className="account">
             <span className="status">Signed in</span>
             <h2>Welcome, {user.name}</h2>
             <p className="email">{user.email}</p>
-            <p className="note">Google sign-in is connected. Your inbox is coming next.</p>
             <button className="secondary" onClick={() => void signOut()} disabled={signingOut}>
               {signingOut ? 'Signing out…' : 'Sign out'}
             </button>
@@ -89,10 +89,11 @@ function App() {
               </svg>
               Sign in with Google
             </a>
-            <p className="note">This step connects your Google identity.<br />Access to your Gmail messages comes later.</p>
+            <p className="note">Connect your Google account to read and send Gmail messages.</p>
           </>
         )}
       </section>
+      {user && <Mailbox key={user.id} />}
     </main>
   )
 }

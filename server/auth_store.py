@@ -28,6 +28,9 @@ class AuthStoreError(Exception):
 
 
 class AuthStore(Protocol):
+    def read_credentials(self, user_id: str) -> str | None: ...
+    def save_credentials(self, user_id: str, encrypted: str) -> None: ...
+    def replace_credentials(self, user_id: str, old: str, encrypted: str) -> bool: ...
     def save_oauth(self, state: str, attempt: PendingLogin) -> None: ...
     def consume_oauth(self, state: str, now: int) -> PendingLogin | None: ...
     def save_session(self, session_id: str, session: Session) -> None: ...
@@ -120,6 +123,33 @@ class DynamoDBAuthStore:
     def delete_oauth(self, state: str) -> None:
         self._call("delete_item", Key={"pk": "oauth#" + state})
 
+    def read_credentials(self, user_id: str) -> str | None:
+        item = self._call(
+            "get_item", Key={"pk": "credentials#" + user_id}, ConsistentRead=True
+        ).get("Item")
+        return item["encrypted"] if item else None
+
+    def save_credentials(self, user_id: str, encrypted: str) -> None:
+        self._call(
+            "put_item", Item={"pk": "credentials#" + user_id, "encrypted": encrypted}
+        )
+
+    def replace_credentials(self, user_id: str, old: str, encrypted: str) -> bool:
+        # A refresh must never overwrite a newer login or another refresh.
+        try:
+            self._table().put_item(
+                Item={"pk": "credentials#" + user_id, "encrypted": encrypted},
+                ConditionExpression="encrypted = :old",
+                ExpressionAttributeValues={":old": old},
+            )
+            return True
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise AuthStoreError("Credential storage unavailable") from None
+        except BotoCoreError:
+            raise AuthStoreError("Credential storage unavailable") from None
+
 
 class MemoryAuthStore:
     """Explicit local/test store only; never a fallback for AWS errors."""
@@ -127,6 +157,7 @@ class MemoryAuthStore:
     def __init__(self):
         self._pending: dict[str, PendingLogin] = {}
         self._sessions: dict[str, Session] = {}
+        self._credentials: dict[str, str] = {}
         self._lock = Lock()
 
     def save_oauth(self, state: str, attempt: PendingLogin) -> None:
@@ -161,3 +192,18 @@ class MemoryAuthStore:
     def delete_oauth(self, state: str) -> None:
         with self._lock:
             self._pending.pop(state, None)
+
+    def read_credentials(self, user_id: str) -> str | None:
+        with self._lock:
+            return self._credentials.get(user_id)
+
+    def save_credentials(self, user_id: str, encrypted: str) -> None:
+        with self._lock:
+            self._credentials[user_id] = encrypted
+
+    def replace_credentials(self, user_id: str, old: str, encrypted: str) -> bool:
+        with self._lock:
+            if self._credentials.get(user_id) != old:
+                return False
+            self._credentials[user_id] = encrypted
+            return True

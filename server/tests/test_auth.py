@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 import main
 from auth_store import DynamoDBAuthStore, MemoryAuthStore
 from google_secret import SecretUnavailableError
+from routes import auth
+from security import SESSION_COOKIE, STATE_COOKIE
 
 
 @pytest.fixture
@@ -34,8 +36,17 @@ def start_login(client):
 
 def complete_login(client, monkeypatch, *, claims_override=None):
     params = start_login(client)
-    flow = Mock(credentials=SimpleNamespace(id_token="private-id-token"))
-    monkeypatch.setattr(main.Flow, "from_client_config", Mock(return_value=flow))
+    flow = Mock(
+        credentials=SimpleNamespace(
+            id_token="private-id-token",
+            token="private-access-token",
+            refresh_token="private-refresh-token",
+            expiry=None,
+            granted_scopes=None,
+            scopes=auth.SCOPES,
+        )
+    )
+    monkeypatch.setattr(auth.Flow, "from_client_config", Mock(return_value=flow))
     claims = {
         "sub": "user-123",
         "email": "tester@example.com",
@@ -44,7 +55,7 @@ def complete_login(client, monkeypatch, *, claims_override=None):
         "nonce": params["nonce"][0],
     }
     claims.update(claims_override or {})
-    monkeypatch.setattr(main.id_token, "verify_oauth2_token", Mock(return_value=claims))
+    monkeypatch.setattr(auth.id_token, "verify_oauth2_token", Mock(return_value=claims))
     response = client.get(
         "/auth/google/callback",
         params={
@@ -60,7 +71,7 @@ def test_authorization_uses_configured_scopes_pkce_and_private_cookie(client):
     params = parse_qs(urlsplit(response.headers["location"]).query)
     assert params["redirect_uri"] == ["http://localhost:8000/auth/google/callback"]
     assert params["code_challenge_method"] == ["S256"]
-    assert set(params["scope"][0].split()) == set(main.SCOPES)
+    assert set(params["scope"][0].split()) == set(auth.SCOPES)
     assert params["nonce"] and params["state"]
     assert "test-secret" not in response.headers["location"]
     assert "HttpOnly" in response.headers["set-cookie"]
@@ -76,7 +87,7 @@ def test_missing_configuration_redirects_with_safe_error():
 
 def test_callback_requires_matching_browser_state(client, monkeypatch):
     fetch = Mock()
-    monkeypatch.setattr(main.Flow, "fetch_token", fetch)
+    monkeypatch.setattr(auth.Flow, "fetch_token", fetch)
     params = start_login(client)
     other_browser = TestClient(client.app, follow_redirects=False)
     response = other_browser.get(
@@ -94,14 +105,14 @@ def test_success_session_replay_and_logout(client, monkeypatch):
     response, params, flow = complete_login(client, monkeypatch)
     assert response.headers["location"] == "http://localhost:5173/"
     flow.fetch_token.assert_called_once_with(code="test-code", timeout=15)
-    main.id_token.verify_oauth2_token.assert_called_once()
+    auth.id_token.verify_oauth2_token.assert_called_once()
     assert (
-        main.id_token.verify_oauth2_token.call_args.args[2]
+        auth.id_token.verify_oauth2_token.call_args.args[2]
         == "test-client.apps.googleusercontent.com"
     )
     assert client.get("/auth/me").json()["user"]["email"] == "tester@example.com"
     assert "private-id-token" not in str(client.cookies)
-    session_id = client.cookies.get(main.SESSION_COOKIE)
+    session_id = client.cookies.get(SESSION_COOKIE)
     replay = client.get(
         "/auth/google/callback",
         params={
@@ -131,7 +142,7 @@ def test_success_session_replay_and_logout(client, monkeypatch):
         ).status_code
         == 200
     )
-    client.cookies.set(main.SESSION_COOKIE, session_id)
+    client.cookies.set(SESSION_COOKIE, session_id)
     assert client.get("/auth/me").json() == {"user": None}
 
 
@@ -145,7 +156,7 @@ def test_invalid_identity_does_not_create_session(client, monkeypatch, claims):
 def test_provider_failure_does_not_expose_secrets(client, monkeypatch, caplog):
     params = start_login(client)
     monkeypatch.setattr(
-        main.Flow, "fetch_token", Mock(side_effect=ValueError("private-token"))
+        auth.Flow, "fetch_token", Mock(side_effect=ValueError("private-token"))
     )
     response = client.get(
         "/auth/google/callback",
@@ -175,8 +186,8 @@ def test_cancellation(client):
 
 def test_expired_pending_login(client, monkeypatch):
     params = start_login(client)
-    now = main.time.time()
-    monkeypatch.setattr(main.time, "time", lambda: now + main.LOGIN_TTL + 1)
+    now = auth.time.time()
+    monkeypatch.setattr(auth.time, "time", lambda: now + auth.LOGIN_TTL + 1)
     response = client.get(
         "/auth/google/callback",
         params={
@@ -189,8 +200,8 @@ def test_expired_pending_login(client, monkeypatch):
 
 def test_expired_session(client, monkeypatch):
     complete_login(client, monkeypatch)
-    now = main.time.time()
-    monkeypatch.setattr(main.time, "time", lambda: now + main.SESSION_TTL + 1)
+    now = auth.time.time()
+    monkeypatch.setattr(auth.time, "time", lambda: now + auth.SESSION_TTL + 1)
     assert client.get("/auth/me").json() == {"user": None}
 
 
@@ -202,6 +213,7 @@ def test_smoke_routes_do_not_initialize_aws(monkeypatch):
             _env_file=None,
             dynamodb_table="auth-table",
             google_client_secret_arn="arn:test",
+            credential_kms_key_id="arn:kms:test",
             cookie_secure=True,
         )
     )
@@ -222,10 +234,19 @@ def test_shared_store_survives_app_replacement_and_logout(monkeypatch):
     second_app = main.create_app(settings, store=store)
     with TestClient(first_app, follow_redirects=False) as first:
         params = start_login(first)
-        flow = Mock(credentials=SimpleNamespace(id_token="private-id-token"))
-        monkeypatch.setattr(main.Flow, "from_client_config", Mock(return_value=flow))
+        flow = Mock(
+            credentials=SimpleNamespace(
+                id_token="private-id-token",
+                token="private-access-token",
+                refresh_token="private-refresh-token",
+                expiry=None,
+                granted_scopes=None,
+                scopes=auth.SCOPES,
+            )
+        )
+        monkeypatch.setattr(auth.Flow, "from_client_config", Mock(return_value=flow))
         monkeypatch.setattr(
-            main.id_token,
+            auth.id_token,
             "verify_oauth2_token",
             Mock(
                 return_value={
@@ -271,7 +292,7 @@ def test_storage_failure_returns_safe_503_without_fallback(monkeypatch, caplog):
     with TestClient(
         main.create_app(main.Settings(_env_file=None), store=store)
     ) as browser:
-        browser.cookies.set(main.SESSION_COOKIE, "private-session")
+        browser.cookies.set(SESSION_COOKIE, "private-session")
         response = browser.get("/auth/me")
     assert response.status_code == 503
     assert response.headers["cache-control"] == "no-store"
@@ -304,6 +325,7 @@ def test_lambda_configures_dynamodb_lazily(monkeypatch):
             _env_file=None,
             dynamodb_table="auth-table",
             google_client_secret_arn="arn:test",
+            credential_kms_key_id="arn:kms:test",
             cookie_secure=True,
         )
     )
@@ -318,7 +340,7 @@ def test_mismatched_cookie_never_consumes_oauth(monkeypatch):
         main.create_app(main.Settings(_env_file=None), store=store),
         follow_redirects=False,
     ) as browser:
-        browser.cookies.set(main.STATE_COOKIE, "browser-state")
+        browser.cookies.set(STATE_COOKIE, "browser-state")
         response = browser.get(
             "/auth/google/callback",
             params={"state": "other-state", "code": "private-code"},
@@ -329,13 +351,13 @@ def test_mismatched_cookie_never_consumes_oauth(monkeypatch):
 
 def test_new_login_revokes_previous_session(client, monkeypatch):
     complete_login(client, monkeypatch)
-    old_id = client.cookies.get(main.SESSION_COOKIE)
+    old_id = client.cookies.get(SESSION_COOKIE)
     # Let the second login generate a fresh real authorization URL.
     monkeypatch.undo()
     complete_login(client, monkeypatch)
-    assert client.cookies.get(main.SESSION_COOKIE) != old_id
+    assert client.cookies.get(SESSION_COOKIE) != old_id
     with TestClient(client.app) as old_browser:
-        old_browser.cookies.set(main.SESSION_COOKIE, old_id)
+        old_browser.cookies.set(SESSION_COOKIE, old_id)
         assert old_browser.get("/auth/me").json() == {"user": None}
 
 
@@ -357,7 +379,7 @@ def test_deployed_cookie_flags(monkeypatch):
         cookie = next(
             value
             for value in response.headers.get_list("set-cookie")
-            if value.startswith(main.SESSION_COOKIE + "=")
+            if value.startswith(SESSION_COOKIE + "=")
         )
         assert all(flag in cookie for flag in ["HttpOnly", "SameSite=lax", "Secure"])
 
@@ -367,11 +389,12 @@ def test_secret_arn_is_lazy_and_supplies_extracted_value(monkeypatch):
         _env_file=None,
         google_client_id="test-client.apps.googleusercontent.com",
         google_client_secret_arn="arn:test",
+        credential_kms_key_id="arn:kms:test",
     )
     getter = Mock(return_value="aws-secret-value")
     monkeypatch.setattr(main.GoogleClientSecret, "get", getter)
-    flow_factory = Mock(wraps=main.Flow.from_client_config)
-    monkeypatch.setattr(main.Flow, "from_client_config", flow_factory)
+    flow_factory = Mock(wraps=auth.Flow.from_client_config)
+    monkeypatch.setattr(auth.Flow, "from_client_config", flow_factory)
     with TestClient(
         main.create_app(settings, store=MemoryAuthStore()), follow_redirects=False
     ) as browser:
@@ -387,6 +410,7 @@ def test_secret_lookup_failure_does_not_start_login(monkeypatch, caplog):
         _env_file=None,
         google_client_id="test-client.apps.googleusercontent.com",
         google_client_secret_arn="arn:test",
+        credential_kms_key_id="arn:kms:test",
     )
     store = Mock()
     monkeypatch.setattr(

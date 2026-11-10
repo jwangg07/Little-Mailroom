@@ -148,8 +148,8 @@ are not written to logs. No OAuth credentials belong in frontend environment fil
 ```powershell
 cd server
 uv run pytest
-uv run ruff check main.py auth_store.py google_secret.py tests
-uv run ruff format --check main.py auth_store.py google_secret.py tests
+uv run ruff check main.py config.py security.py routes auth_store.py credential_vault.py google_secret.py gmail_service.py tests
+uv run ruff format --check main.py config.py security.py routes auth_store.py credential_vault.py google_secret.py gmail_service.py tests
 ```
 
 ```powershell

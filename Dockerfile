@@ -18,9 +18,10 @@ RUN uv sync --locked --no-dev --no-install-project --python /usr/local/bin/pytho
 FROM backend-build AS test
 RUN uv sync --locked --no-install-project --python /usr/local/bin/python
 ENV PATH="/app/server/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1
-COPY server/main.py server/auth_store.py server/google_secret.py ./
+COPY server/main.py server/auth_store.py server/google_secret.py server/credential_vault.py server/gmail_service.py server/config.py server/security.py ./
+COPY server/routes/ ./routes/
 COPY server/tests/ ./tests/
-CMD ["sh", "-c", "python -m pytest tests -q && ruff check main.py auth_store.py google_secret.py tests && ruff format --check main.py auth_store.py google_secret.py tests"]
+CMD ["sh", "-c", "python -m pytest tests -q && ruff check *.py routes tests && ruff format --check *.py routes tests"]
 
 FROM python:3.12-slim-bookworm AS runtime
 COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.1.0 /lambda-adapter /opt/extensions/lambda-adapter
@@ -35,7 +36,8 @@ RUN groupadd --gid 10001 mailroom \
     && useradd --uid 10001 --gid mailroom --no-create-home mailroom
 WORKDIR /app/server
 COPY --from=backend-build /app/server/.venv /app/server/.venv
-COPY server/main.py server/auth_store.py server/google_secret.py ./
+COPY server/main.py server/auth_store.py server/google_secret.py server/credential_vault.py server/gmail_service.py server/config.py server/security.py ./
+COPY server/routes/ ./routes/
 COPY --from=frontend-build /build/client/dist /app/client/dist
 USER 10001:10001
 EXPOSE 8000
