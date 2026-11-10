@@ -1,0 +1,95 @@
+:root {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  color: #343a32;
+  background: #f4f0e7;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  font: inherit;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+:focus-visible {
+  outline: 3px solid #829475;
+  outline-offset: 3px;
+}
+
+.mailroom {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 32px 20px;
+  gap: 24px;
+}
+
+.google-button,
+.secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 13px 22px;
+  border: 1px solid #cccfc5;
+  border-radius: 8px;
+  background: white;
+  color: #343a32;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.google-button:hover,
+.secondary:hover {
+  background: #f3f5ef;
+  border-color: #829475;
+}
+
+.error {
+  padding: 14px;
+  border-radius: 8px;
+  background: #fff0e9;
+  color: #94432b;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+h2 {
+  margin: 18px 0 8px;
+  font-size: 21px;
+  overflow-wrap: anywhere;
+}
+
+.secondary {
+  margin-top: 24px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

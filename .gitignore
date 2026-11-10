@@ -221,3 +221,7 @@ __marimo__/
 
 private
 .tools/
+
+# Frontend source helpers are not Python build output.
+!client/src/lib/
+!client/src/lib/**

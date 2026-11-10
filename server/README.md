@@ -1,19 +1,19 @@
 # Mini Mailroom backend
 
-See the [project README](../README.md) for Google OAuth configuration, local
-startup commands, and the scope and limitations of this sign-in increment.
+See the [project README](../README.md) for local startup and AWS configuration,
+and the [architecture guide](../docs/ARCHITECTURE.md) for complete feature flows.
 
-## Backend layout
+- `main.py`: small Uvicorn entry point (`main:app`).
+- `app/application.py`: `create_app()` and explicit per-app dependency wiring.
+- `app/config.py`: settings; `.env` remains at `server/.env`.
+- `app/http.py`: safe error handlers and private response headers.
+- `app/auth/`: OAuth router, Google exchange/verification, session checks,
+  identity/session models, and the store contract with memory/DynamoDB stores.
+- `app/mail/`: router, request validation, user operations, authenticated Gmail
+  transport, credential lifecycle, and MIME/display formatting.
+- `integrations/google/`: lazy client-secret retrieval and credential encryption.
+- `tests/auth/`, `tests/mail/`, `tests/integrations/`: fake Google/AWS boundaries.
 
-- `main.py`: creates the application, wires services and routers, registers error
-  handlers and privacy headers, and serves the built frontend.
-- `config.py`: loads backend settings from environment variables and `server/.env`.
-- `routes/auth.py`: Google OAuth, session lookup, and sign-out endpoints.
-- `routes/mail.py`: inbox, message reading, and sending endpoints, plus send validation.
-- `security.py`: shared session-cookie names, authentication, and origin checks.
-- `auth_store.py`, `credential_vault.py`, `google_secret.py`, and `gmail_service.py`:
-  storage, encryption, secret retrieval, and Gmail operations.
-- `tests/`: tests with fake Google and AWS boundaries.
-
-Run commands still use `main:app`. Router factories receive each application's
-settings, store, and services so separate app instances do not share session state.
+Run commands from `server/`. The application runs from source rather than an
+installed CLI package. `uv sync` installs dependencies without the old scaffold.
+App factories receive isolated settings and storage, with no global service registry.

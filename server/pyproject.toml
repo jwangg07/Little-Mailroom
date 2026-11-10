@@ -1,7 +1,7 @@
 [project]
 name = "server"
 version = "0.1.0"
-description = "Add your description here"
+description = "Mini Mailroom API and Gmail integration"
 readme = "README.md"
 authors = [
     { name = "Jerry Wang", email = "wangjerry1007@gmail.com" }
@@ -16,12 +16,8 @@ dependencies = [
     "requests>=2.32,<3",
 ]
 
-[project.scripts]
-server = "server:main"
-
-[build-system]
-requires = ["uv_build>=0.13.7,<0.14.0"]
-build-backend = "uv_build"
+[tool.uv]
+package = false
 
 [dependency-groups]
 dev = [
@@ -29,3 +25,7 @@ dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.4",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

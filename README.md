@@ -1,10 +1,10 @@
 # Mini-Mailroom
 
-A Gmail client growing into a cozy pixel-art mailroom. The first implemented
-step is Google sign-in; inbox access is next.
+A Gmail client growing into a cozy pixel-art mailroom. Sign in with Google,
+browse and paginate your inbox, read plain-text messages, and send email.
 
-For a walkthrough of the backend and frontend authentication code, see the
-[Google sign-in code guide](private/OAUTH_CODE_GUIDE.md).
+See the [architecture guide](docs/ARCHITECTURE.md) to follow sign-in, inbox
+loading, and sending from the screen through the backend.
 
 ## Run locally
 
@@ -36,11 +36,13 @@ Requirements: Node.js, Python 3.11+ (3.12 is the planned target), and
    ```
 
 5. Open **http://localhost:5173** and click **Sign in with Google**. After Google
-   approval, the page shows your name and email. Sign out ends the local session.
+   approval, the page shows your account and inbox. Enable the Gmail API in your
+   Google Cloud project. Use **Reconnect Gmail** if an older grant lacks mail
+   access or a refresh token. Sign out ends the browser session.
 
 Use `localhost` for both servers and in your browser, rather than mixing it with
 `127.0.0.1`: the OAuth state cookie must return on the same hostname. Vite proxies
-`/auth` to the backend. Port 5173 is fixed so the return URL stays consistent.
+`/auth` and `/api` to the backend. Port 5173 is fixed so the return URL stays consistent.
 If you change the frontend URL, also set `FRONTEND_URL` in `server/.env`.
 
 ## Deploy to AWS without local Docker
@@ -60,8 +62,10 @@ Use a Lambda container-image function in the same region as ECR, with x86_64
 architecture, the scoped runtime role in `deploy/lambda-runtime-policy.json`,
 and a public Function URL for this same-origin prototype. No Application Load
 Balancer, VPC attachment, provisioned concurrency, or API Gateway is needed.
-The function requires `DYNAMODB_TABLE`, `GOOGLE_CLIENT_SECRET_ARN`, and
-`COOKIE_SECURE=true`. Set `GOOGLE_CLIENT_ID`, `FRONTEND_URL`, and
+The function requires `DYNAMODB_TABLE`, `GOOGLE_CLIENT_SECRET_ARN`,
+`CREDENTIAL_KMS_KEY_ID`, and `COOKIE_SECURE=true`. Grant its role
+`kms:GenerateDataKey` and `kms:Decrypt` for that key, in addition to access to
+the authentication table and Google client secret. Set `GOOGLE_CLIENT_ID`, `FRONTEND_URL`, and
 `GOOGLE_REDIRECT_URI` to your matching Google client and Function URL.
 
 Keep secrets out of CodeBuild and Git. Lambda loads the `GOOGLE_CLIENT_SECRET`
@@ -95,6 +99,11 @@ Ensure port 8000 is free before starting the container.
 The multi-stage Dockerfile installs locked backend dependencies into a Linux
 virtual environment and runs the final container as a non-root user. Credentials
 are passed at runtime; `.env` and local environments are excluded from the build.
+Both test and runtime stages copy `server/app` and `server/integrations`;
+`main:app` remains the entry point and assets remain at `/app/client/dist`.
+For builders behind an HTTPS inspection proxy, optionally pass
+`--secret id=proxy_ca,src=/path/to/trusted-ca-bundle.pem` to `docker build`.
+The bundle is mounted only while installing dependencies.
 Rebuild the image after changing source files. In explicit local memory mode,
 restarting the container clears sessions and pending sign-in attempts.
 
@@ -122,21 +131,28 @@ mode or a missing table at startup. Creating the app, `/health`, and an unsigned
 smoke checks without credentials. `/health` is a liveness check, not an AWS
 connectivity test. Tests inject an isolated store through `create_app(..., store=...)`.
 
-Lambda also requires the secret ARN and Secure cookies at startup. Locally, a
-plain `GOOGLE_CLIENT_SECRET` from `.env` still works when no ARN is configured.
+Lambda also requires the secret ARN, KMS key ID, and Secure cookies at startup.
+Gmail credentials use AES-GCM with a per-user encryption context; Lambda wraps
+data keys with KMS. Credentials have no session TTL. For local DynamoDB use,
+configure a KMS key or a stable `CREDENTIAL_ENCRYPTION_KEY` encoding 32 bytes.
+Memory mode can use an ephemeral key; restarting clears sessions and credentials.
+Locally, a plain `GOOGLE_CLIENT_SECRET` from `.env` still works when no ARN is configured.
 
 ## OAuth scope and current limits
 
-This increment requests `openid`, email, profile, and Gmail readonly. It uses Google's
+The app requests `openid`, email, profile, and Gmail modify access. It uses Google's
 [web-server OAuth flow](https://developers.google.com/identity/protocols/oauth2/web-server)
 with PKCE, one-time browser-bound state, nonce validation, and verified ID tokens.
-The Google secret and tokens remain server-side; tokens are discarded after
-sign-in. The browser holds only an opaque HttpOnly, SameSite session cookie.
+The Google secret and tokens remain server-side. Gmail credentials are encrypted
+per user and stored separately from browser sessions; access tokens refresh when
+needed. The browser holds only an opaque HttpOnly, SameSite session cookie.
 
 Sessions last eight hours and persist across backend instances when DynamoDB is
-configured. Persistent encrypted Gmail credentials, refresh,
-disconnect/revocation, and mail reading remain subsequent Phase 1 work.
-Sign out does not revoke the Google consent grant. This is a local prototype;
+configured. Inbox lists use 20 messages per page; opening a message displays its
+plain-text body without rendering email HTML. Sending supports one recipient and
+a plain-text body. Attachments, search, and disconnect/revocation remain future
+work. Sign out ends the browser session but retains encrypted Gmail credentials
+and does not revoke the Google consent grant. This is a local prototype;
 deployment requires HTTPS, `COOKIE_SECURE=true`, configured DynamoDB storage,
 and the appropriate production proxy configuration.
 
@@ -148,8 +164,8 @@ are not written to logs. No OAuth credentials belong in frontend environment fil
 ```powershell
 cd server
 uv run pytest
-uv run ruff check main.py config.py security.py routes auth_store.py credential_vault.py google_secret.py gmail_service.py tests
-uv run ruff format --check main.py config.py security.py routes auth_store.py credential_vault.py google_secret.py gmail_service.py tests
+uv run ruff check main.py app integrations tests
+uv run ruff format --check main.py app integrations tests
 ```
 
 ```powershell
