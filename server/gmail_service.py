@@ -2,7 +2,7 @@
 
 import base64
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
@@ -109,16 +109,11 @@ class GmailService:
         if not needed.intersection(data["scopes"]):
             raise reconnect()
         expiry = (
-            datetime.fromisoformat(data["expiry"])
-            .replace(tzinfo=timezone.utc)
-            .timestamp()
+            datetime.fromisoformat(data["expiry"]).replace(tzinfo=UTC).timestamp()
             if data.get("expiry")
             else 0
         )
-        if (
-            not data.get("token")
-            or expiry <= datetime.now(timezone.utc).timestamp() + 60
-        ):
+        if not data.get("token") or expiry <= datetime.now(UTC).timestamp() + 60:
             data = self._refresh(user_id, encrypted, data)
         if not needed.intersection(data["scopes"]):
             raise reconnect()
