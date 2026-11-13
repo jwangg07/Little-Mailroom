@@ -1,6 +1,12 @@
-import type { useInbox } from './useInbox'
+import type { InboxPage } from './types'
 
-type InboxProps = ReturnType<typeof useInbox> & {
+type InboxProps = {
+  page: InboxPage
+  pageToken: string
+  loading: boolean
+  error: string
+  refreshInbox: () => void
+  showOlderMessages: () => void
   onOpenMessage: (id: string) => Promise<void>
 }
 
@@ -11,7 +17,6 @@ export default function Inbox({
   error,
   refreshInbox,
   showOlderMessages,
-  showNewestMessages,
   onOpenMessage,
 }: InboxProps) {
   return (
@@ -64,7 +69,7 @@ export default function Inbox({
             </button>
           )}
           {pageToken && (
-            <button className="secondary" onClick={showNewestMessages}>
+            <button className="secondary" onClick={refreshInbox}>
               Newest messages
             </button>
           )}

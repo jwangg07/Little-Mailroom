@@ -1,5 +1,5 @@
 import { requestJson } from '../../lib/http'
-import type { InboxPage, MailDraft, MailMessage, SentMail } from './types'
+import type { InboxPage, MailDraft, MailMessage } from './types'
 
 const mailRequestFailed = 'Mail request failed. Please try again.'
 
@@ -26,9 +26,9 @@ export function getMessage(
   )
 }
 
-export function sendMail(draft: MailDraft): Promise<SentMail> {
+export async function sendMail(draft: MailDraft): Promise<void> {
   // Never retry a send automatically: a lost response can still mean delivery.
-  return requestJson(
+  await requestJson(
     '/api/mail/send',
     {
       method: 'POST',

@@ -6,6 +6,18 @@ uses routers for HTTP/authentication, services for user actions, and integration
 code for Google/AWS. Dependencies are assembled explicitly in
 [`create_app()`](../server/app/application.py).
 
+The main request paths are:
+
+```text
+Frontend: component → hook → feature api.ts → lib/http.ts
+Backend:  router → GmailService → GmailClient → Google
+```
+
+Routers enforce authentication and validate requests. Services perform mail actions;
+the client handles Google's HTTP API. `GmailCredentials` loads and refreshes tokens
+through `AuthStore` and `CredentialVault`. Components declare the props they need;
+hooks own their state and requests. Only `application.py` assembles backend objects.
+
 ## Sign in and sign out
 
 1. [`App`](../client/src/App.tsx) calls

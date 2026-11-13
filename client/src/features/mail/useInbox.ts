@@ -46,10 +46,6 @@ export function useInbox() {
     if (page.nextPageToken) setPageToken(page.nextPageToken)
   }
 
-  function showNewestMessages() {
-    setPageToken('')
-  }
-
   return {
     page,
     pageToken,
@@ -57,6 +53,5 @@ export function useInbox() {
     error,
     refreshInbox,
     showOlderMessages,
-    showNewestMessages,
   }
 }

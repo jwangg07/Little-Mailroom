@@ -7,11 +7,14 @@ from email.message import EmailMessage, Message
 from fastapi import HTTPException
 
 
-def mail_summary(data: dict) -> dict:
-    headers = {
-        header["name"].lower(): header["value"]
-        for header in data.get("payload", {}).get("headers", [])
+def _headers(part: dict) -> dict[str, str]:
+    return {
+        header["name"].lower(): header["value"] for header in part.get("headers", [])
     }
+
+
+def mail_summary(data: dict) -> dict:
+    headers = _headers(data.get("payload", {}))
     return {
         "id": data["id"],
         "threadId": data.get("threadId"),
@@ -25,7 +28,7 @@ def mail_summary(data: dict) -> dict:
 
 def mail_message(data: dict) -> dict:
     payload = data.get("payload", {})
-    headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
+    headers = _headers(payload)
     text = "This message has no plain-text version. View it in Gmail."
     pending = [(payload, 0)]
     visited = 0
@@ -34,7 +37,7 @@ def mail_message(data: dict) -> dict:
         visited += 1
         if depth > 20 or visited > 100:
             raise HTTPException(413, "This message is too complex. Open it in Gmail.")
-        part_headers = {h["name"].lower(): h["value"] for h in part.get("headers", [])}
+        part_headers = _headers(part)
         if part.get("filename") or part_headers.get(
             "content-disposition", ""
         ).lower().startswith("attachment"):

@@ -36,10 +36,6 @@ export default function Mailbox() {
     }
   }
 
-  function closeMessage() {
-    setSelected(null)
-  }
-
   return (
     <section className="mailbox" aria-label="Your mail">
       <Inbox {...inbox} onOpenMessage={openMessage} />
@@ -49,7 +45,9 @@ export default function Mailbox() {
         </p>
       )}
       {opening && <p role="status">Opening message...</p>}
-      {selected && <MessageDetail message={selected} onClose={closeMessage} />}
+      {selected && (
+        <MessageDetail message={selected} onClose={() => setSelected(null)} />
+      )}
       <ComposeForm />
     </section>
   )

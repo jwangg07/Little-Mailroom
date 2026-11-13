@@ -1,6 +1,5 @@
 export type MailSummary = {
   id: string
-  threadId?: string | null
   from: string
   subject: string
   date: string
@@ -9,7 +8,6 @@ export type MailSummary = {
 }
 
 export type MailMessage = {
-  id: string
   from: string
   subject: string
   body: string
@@ -25,5 +23,3 @@ export type MailDraft = {
   subject: string
   body: string
 }
-
-export type SentMail = { id: string; threadId: string | null }

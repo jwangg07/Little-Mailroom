@@ -2,7 +2,6 @@
   width: 100%;
   max-width: 860px;
   padding: 24px;
-  box-sizing: border-box;
   background: #fffdf8;
   border: 1px solid #ddd9cb;
   border-radius: 20px;
@@ -39,7 +38,6 @@
   border-bottom: 1px solid #ddd9cb;
   text-align: left;
   cursor: pointer;
-  font: inherit;
   color: inherit;
 }
 
@@ -92,7 +90,6 @@
 .compose input,
 .compose textarea {
   width: 100%;
-  box-sizing: border-box;
   font: inherit;
   padding: 12px;
   border: 1px solid #cccfc5;

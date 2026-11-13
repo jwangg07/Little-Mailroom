@@ -112,8 +112,6 @@ def create_app(
     def mail_service() -> GmailService:
         return GmailService(GmailClient(mail_credentials()))
 
-    app.state.mail_service = mail_service
-
     configure_http(app, production=production)
 
     @app.get("/health")
@@ -129,8 +127,7 @@ def create_app(
 
     # Register last so API routes take priority over the frontend at "/".
     # An unbuilt frontend should not prevent running the backend in dev mode.
-    frontend_dist = FRONTEND_DIST
-    if (frontend_dist / "index.html").is_file():
-        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    if (FRONTEND_DIST / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 
     return app
