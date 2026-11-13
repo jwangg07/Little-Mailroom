@@ -3,13 +3,23 @@
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:DeleteItem"],
+      "Action": ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:DeleteItem", "dynamodb:UpdateItem"],
       "Resource": "arn:aws:dynamodb:us-east-2:965984382371:table/mini-mailroom-auth"
     },
     {
       "Effect": "Allow",
       "Action": "secretsmanager:GetSecretValue",
       "Resource": "arn:aws:secretsmanager:us-east-2:965984382371:secret:mini-mailroom/google-client-secret-X5rGCU"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+      "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/KEY_ID",
+      "Condition": {
+        "StringEquals": {"kms:EncryptionContext:app": "mini-mailroom"},
+        "Null": {"kms:EncryptionContext:user_id": "false"},
+        "ForAllValues:StringEquals": {"kms:EncryptionContextKeys": ["app", "user_id"]}
+      }
     }
   ]
 }

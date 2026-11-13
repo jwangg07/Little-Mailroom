@@ -39,6 +39,49 @@ class GmailCredentials:
         self.client_id = client_id
         self.get_secret = get_secret
 
+    def disconnect(self, user_id: str) -> bool:
+        encrypted = self.store.read_credentials(user_id)
+        if not encrypted:
+            self.store.invalidate_user_sessions(user_id)
+            return False
+        data = self.vault.decrypt(user_id, encrypted)
+        token = data.get("refresh_token") or data.get("token")
+        if not token:
+            raise HTTPException(
+                409,
+                "Remove Mini Mailroom in your Google Account connections, then try again.",
+            )
+        try:
+            with requests.Session() as session:
+                response = session.post(
+                    "https://oauth2.googleapis.com/revoke",
+                    data={"token": token},
+                    timeout=15,
+                    allow_redirects=False,
+                )
+            error = response.json() if response.status_code == 400 else {}
+            already_revoked = (
+                isinstance(error, dict) and error.get("error") == "invalid_token"
+            )
+            if response.status_code != 200 and not already_revoked:
+                raise HTTPException(
+                    503,
+                    "Sign-out is incomplete: Google could not confirm disconnection. Please try again.",
+                )
+        except (requests.RequestException, ValueError):
+            # Keep the encrypted credential so a failed revocation can be retried.
+            raise HTTPException(
+                503,
+                "Sign-out is incomplete: Google could not confirm disconnection. Please try again.",
+            ) from None
+        self.store.invalidate_user_sessions(user_id)
+        if not self.store.delete_credentials(user_id, encrypted):
+            raise HTTPException(
+                409,
+                "Your connection changed. Sign in and sign out again to finish disconnecting Gmail.",
+            )
+        return True
+
     def capture(self, user_id: str, credentials: Credentials) -> None:
         old = self.store.read_credentials(user_id)
         previous = self.vault.decrypt(user_id, old) if old else {}

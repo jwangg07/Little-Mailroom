@@ -17,6 +17,7 @@ export function useSession() {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const [signingOut, setSigningOut] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(() => {
     const code = new URLSearchParams(window.location.search).get('auth_error')
     return code ? (authErrors[code] ?? authErrors.failed) : null
@@ -53,15 +54,19 @@ export function useSession() {
     signingOutRequest.current = true
     setSigningOut(true)
     setError(null)
+    setNotice(null)
     try {
-      await logout()
+      const result = await logout()
       setUser(null)
-    } catch {
-      setError('Could not sign out. Please try again.')
+      setNotice(result.revoked
+        ? 'Signed out on all devices. Gmail is disconnected and saved access was removed. Your emails remain in Gmail.'
+        : 'Signed out of this browser. We could not confirm Gmail disconnection because your session or saved access expired. Remove Mini Mailroom in your Google Account connections to revoke any remaining permission.')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Sign-out could not be confirmed. Please try again.')
     } finally {
       signingOutRequest.current = false
       setSigningOut(false)
     }
   }
-  return { user, loading, signingOut, error, signOut }
+  return { user, loading, signingOut, notice, error, signOut }
 }

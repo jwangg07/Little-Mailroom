@@ -1,6 +1,7 @@
 """Explicit application assembly and per-app dependency wiring."""
 
 import os
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -26,27 +27,58 @@ def create_app(
         os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
         or os.environ.get("AWS_LAMBDA_RUNTIME_API")
     )
-    if on_lambda and (
-        settings.auth_store != "dynamodb"
-        or not settings.dynamodb_table.strip()
-        or (store is not None and not isinstance(store, DynamoDBAuthStore))
-    ):
-        raise RuntimeError("Lambda requires DYNAMODB_TABLE and DynamoDB authentication")
-    if on_lambda and (
-        not settings.google_client_secret_arn.strip() or not settings.cookie_secure
-    ):
-        raise RuntimeError(
-            "Lambda requires GOOGLE_CLIENT_SECRET_ARN and COOKIE_SECURE=true"
+    production = on_lambda or settings.app_env == "production"
+    if production:
+        settings = settings.model_copy(update={"app_env": "production"})
+        if (
+            settings.auth_store != "dynamodb"
+            or not settings.dynamodb_table.strip()
+            or (store is not None and not isinstance(store, DynamoDBAuthStore))
+        ):
+            raise RuntimeError("Production requires DynamoDB authentication")
+        if (
+            not settings.cookie_secure
+            or not settings.credential_kms_key_id.strip()
+            or not settings.google_client_secret_arn.strip()
+        ):
+            raise RuntimeError(
+                "Production requires COOKIE_SECURE=true, GOOGLE_CLIENT_SECRET_ARN, and CREDENTIAL_KMS_KEY_ID"
+            )
+        frontend, callback = (
+            urlsplit(settings.frontend_url),
+            urlsplit(settings.google_redirect_uri),
         )
-    if on_lambda and not settings.credential_kms_key_id.strip():
-        raise RuntimeError("Lambda requires CREDENTIAL_KMS_KEY_ID")
+        if any(
+            url.scheme != "https"
+            or not url.hostname
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            for url in (frontend, callback)
+        ):
+            raise RuntimeError(
+                "Production requires HTTPS frontend and callback URLs without credentials, query, or fragment"
+            )
+        if (
+            frontend.netloc != callback.netloc
+            or frontend.path not in ("", "/")
+            or callback.path != "/auth/google/callback"
+        ):
+            raise RuntimeError(
+                "Production requires same-origin frontend and /auth/google/callback"
+            )
     if store is None:
         store = (
             MemoryAuthStore()
             if settings.auth_store == "memory"
             else DynamoDBAuthStore(settings.dynamodb_table)
         )
-    app = FastAPI()
+    app = FastAPI(
+        docs_url=None if production else "/docs",
+        redoc_url=None if production else "/redoc",
+        openapi_url=None if production else "/openapi.json",
+    )
     secret_source = (
         GoogleClientSecret(settings.google_client_secret_arn)
         if settings.google_client_secret_arn
@@ -82,7 +114,7 @@ def create_app(
 
     app.state.mail_service = mail_service
 
-    configure_http(app)
+    configure_http(app, production=production)
 
     @app.get("/health")
     def health():

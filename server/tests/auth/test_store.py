@@ -14,12 +14,15 @@ from app.auth.store import (
     AuthStoreError,
     DynamoDBAuthStore,
     MemoryAuthStore,
+    session_key,
 )
 
 
 @pytest.fixture
 def table():
-    return Mock()
+    mock = Mock()
+    mock.get_item.return_value = {}
+    return mock
 
 
 @pytest.fixture
@@ -47,9 +50,10 @@ def test_writes_use_distinct_keys_integer_ttl_and_no_overwrite(store, table):
         "expires_at": 601,
     }
     assert session["Item"] == {
-        "pk": "session#session",
+        "pk": session_key("session"),
         "user": {"id": "user"},
         "expires_at": 28801,
+        "generation": "",
     }
     assert oauth["ConditionExpression"] == "attribute_not_exists(pk)"
     assert session["ConditionExpression"] == "attribute_not_exists(pk)"
@@ -89,14 +93,21 @@ def test_expired_or_missing_session_rejected_before_ttl_cleanup(store, table, it
     table.get_item.return_value = {"Item": item} if item else {}
     assert store.read_session("session", 601) is None
     table.get_item.assert_called_once_with(
-        Key={"pk": "session#session"}, ConsistentRead=True
+        Key={"pk": session_key("session")}, ConsistentRead=True
     )
 
 
 def test_session_read_converts_dynamodb_number(store, table):
-    table.get_item.return_value = {
-        "Item": {"user": {"id": "user"}, "expires_at": Decimal(601)}
-    }
+    table.get_item.side_effect = [
+        {
+            "Item": {
+                "user": {"id": "user"},
+                "expires_at": Decimal(601),
+                "generation": "",
+            }
+        },
+        {},
+    ]
     assert store.read_session("session", 600) == Session({"id": "user"}, 601)
 
 
@@ -104,7 +115,7 @@ def test_deletes_are_scoped_by_item_type(store, table):
     store.delete_session("id")
     store.delete_oauth("id")
     assert [call.kwargs for call in table.delete_item.call_args_list] == [
-        {"Key": {"pk": "session#id"}},
+        {"Key": {"pk": session_key("id")}},
         {"Key": {"pk": "oauth#id"}},
     ]
 

@@ -1,5 +1,6 @@
 """Authenticated Gmail HTTP requests and provider error translation."""
 
+import json
 from datetime import UTC, datetime
 
 import requests
@@ -8,6 +9,7 @@ from fastapi import HTTPException
 from app.mail.credentials import READ_SCOPES, SEND_SCOPES, GmailCredentials, reconnect
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 class GmailClient:
@@ -38,8 +40,24 @@ class GmailClient:
                     GMAIL + path,
                     headers={"Authorization": "Bearer " + data["token"]},
                     timeout=20,
+                    stream=True,
+                    allow_redirects=False,
                     **kwargs,
                 )
+                if response.status_code == 200:
+                    payload = bytearray()
+                    try:
+                        for chunk in response.iter_content(chunk_size=65536):
+                            payload.extend(chunk)
+                            if len(payload) > MAX_RESPONSE_BYTES:
+                                raise HTTPException(
+                                    413,
+                                    "This message is too large for Mini Mailroom. Open it in Gmail.",
+                                )
+                    finally:
+                        response.close()
+                else:
+                    response.close()
         except requests.RequestException:
             detail = (
                 "Send result unknown. Check Sent in Gmail before sending again."
@@ -64,7 +82,7 @@ class GmailClient:
             raise HTTPException(404, "Message not found.")
         if response.status_code == 429:
             raise HTTPException(429, "Gmail rate limit reached. Try again later.")
-        if not response.ok:
+        if response.status_code != 200:
             detail = (
                 "Send result unknown. Check Sent in Gmail before sending again."
                 if method == "POST" and response.status_code >= 500
@@ -72,6 +90,9 @@ class GmailClient:
             )
             raise HTTPException(502, detail)
         try:
-            return response.json()
-        except ValueError:
+            result = json.loads(payload)
+            if not isinstance(result, dict):
+                raise TypeError
+            return result
+        except (ValueError, TypeError):
             raise HTTPException(502, "Gmail returned an invalid response.") from None

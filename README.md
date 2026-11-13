@@ -3,12 +3,14 @@
 A Gmail client growing into a cozy pixel-art mailroom. Sign in with Google,
 browse and paginate your inbox, read plain-text messages, and send email.
 
+See the [security guide](docs/SECURITY_CHANGES.md) for the changes and rollout steps.
+
 See the [architecture guide](docs/ARCHITECTURE.md) to follow sign-in, inbox
 loading, and sending from the screen through the backend.
 
 ## Run locally
 
-Requirements: Node.js, Python 3.11+ (3.12 is the planned target), and
+Requirements: Node.js 24, Python 3.11.1, and
 [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 1. Create a **Web application** OAuth client in Google Cloud. Register this exact
@@ -38,12 +40,17 @@ Requirements: Node.js, Python 3.11+ (3.12 is the planned target), and
 5. Open **http://localhost:5173** and click **Sign in with Google**. After Google
    approval, the page shows your account and inbox. Enable the Gmail API in your
    Google Cloud project. Use **Reconnect Gmail** if an older grant lacks mail
-   access or a refresh token. Sign out ends the browser session.
+   access or a refresh token. Sign out disconnects Gmail and ends your app sessions on all devices.
 
 Use `localhost` for both servers and in your browser, rather than mixing it with
 `127.0.0.1`: the OAuth state cookie must return on the same hostname. Vite proxies
 `/auth` and `/api` to the backend. Port 5173 is fixed so the return URL stays consistent.
 If you change the frontend URL, also set `FRONTEND_URL` in `server/.env`.
+
+Local Python remains pinned to 3.11.1 for compatibility with your installation.
+Docker uses its own patched Python 3.12.15 runtime; it does not change your local
+installation. Python 3.11.1 lacks later security fixes and should stay a local
+development choice, not the production runtime.
 
 ## Deploy to AWS without local Docker
 
@@ -51,7 +58,8 @@ For a low-memory laptop, build the Docker image remotely with AWS CodeBuild,
 store it in Amazon ECR, and run it on AWS Lambda with Lambda Web Adapter. Your laptop
 only needs Git and a browser for deployment; Docker Desktop is optional.
 
-Follow the [manual Lambda deployment checklist](private/LAMBDA_MIGRATION.md).
+Follow the [security rollout notes](docs/SECURITY_CHANGES.md#before-deployment) and your private
+Lambda deployment checklist.
 The existing `Dockerfile` and `buildspec.yml` are the single Lambda build path;
 no alternate Dockerfile or buildspec is needed. CodeBuild runs backend tests and
 lint, builds React and the production image, smoke-tests frontend assets and API
@@ -63,7 +71,7 @@ architecture, the scoped runtime role in `deploy/lambda-runtime-policy.json`,
 and a public Function URL for this same-origin prototype. No Application Load
 Balancer, VPC attachment, provisioned concurrency, or API Gateway is needed.
 The function requires `DYNAMODB_TABLE`, `GOOGLE_CLIENT_SECRET_ARN`,
-`CREDENTIAL_KMS_KEY_ID`, and `COOKIE_SECURE=true`. Grant its role
+`CREDENTIAL_KMS_KEY_ID`, `APP_ENV=production`, and `COOKIE_SECURE=true`. Grant its role
 `kms:GenerateDataKey` and `kms:Decrypt` for that key, in addition to access to
 the authentication table and Google client secret. Set `GOOGLE_CLIENT_ID`, `FRONTEND_URL`, and
 `GOOGLE_REDIRECT_URI` to your matching Google client and Function URL.
@@ -88,7 +96,7 @@ Start Docker Desktop using Linux containers. From the project root, build and ru
 
 ```powershell
 docker build -t mini-mailroom:dev .
-docker run --rm --name mini-mailroom -p 8000:8000 --env-file server/.env -e AUTH_STORE=memory -e FRONTEND_URL=http://localhost:8000 -e GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback -e COOKIE_SECURE=false mini-mailroom:dev
+docker run --rm --name mini-mailroom -p 8000:8000 --env-file server/.env -e APP_ENV=development -e AUTH_STORE=memory -e FRONTEND_URL=http://localhost:8000 -e GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback -e COOKIE_SECURE=false mini-mailroom:dev
 ```
 
 Open **http://localhost:8000**. The image builds React and serves it through
@@ -118,7 +126,9 @@ Authentication defaults to DynamoDB. Set `AUTH_STORE=dynamodb` and
 `DYNAMODB_TABLE=mini-mailroom-auth` in the deployed service. Create the table in
 the runtime's AWS region with a String partition key `pk`, and enable TTL on
 `expires_at`. Grant the runtime role `dynamodb:PutItem`, `dynamodb:GetItem`, and
-`dynamodb:DeleteItem` on that table. Use role credentials rather than static keys.
+`dynamodb:DeleteItem`, and `dynamodb:UpdateItem` on that table. Replace the
+KMS placeholder with your actual key ARN and verify the existing table/secret ARNs.
+Use role credentials rather than static keys.
 
 OAuth attempts expire after ten minutes and are consumed with one conditional
 delete; sessions expire after eight hours and use consistent reads. The app
@@ -133,14 +143,16 @@ connectivity test. Tests inject an isolated store through `create_app(..., store
 
 Lambda also requires the secret ARN, KMS key ID, and Secure cookies at startup.
 Gmail credentials use AES-GCM with a per-user encryption context; Lambda wraps
-data keys with KMS. Credentials have no session TTL. For local DynamoDB use,
+data keys with KMS. Credentials expire 30 days after their last login capture or token refresh.
+Expired credentials cannot be used even while DynamoDB TTL deletion is pending. For local DynamoDB use,
 configure a KMS key or a stable `CREDENTIAL_ENCRYPTION_KEY` encoding 32 bytes.
 Memory mode can use an ephemeral key; restarting clears sessions and credentials.
 Locally, a plain `GOOGLE_CLIENT_SECRET` from `.env` still works when no ARN is configured.
 
 ## OAuth scope and current limits
 
-The app requests `openid`, email, profile, and Gmail modify access. It uses Google's
+The app requests `openid`, email, profile, and `gmail.modify`. The broader Gmail
+permission is retained for planned mailbox features. It uses Google's
 [web-server OAuth flow](https://developers.google.com/identity/protocols/oauth2/web-server)
 with PKCE, one-time browser-bound state, nonce validation, and verified ID tokens.
 The Google secret and tokens remain server-side. Gmail credentials are encrypted
@@ -150,11 +162,25 @@ needed. The browser holds only an opaque HttpOnly, SameSite session cookie.
 Sessions last eight hours and persist across backend instances when DynamoDB is
 configured. Inbox lists use 20 messages per page; opening a message displays its
 plain-text body without rendering email HTML. Sending supports one recipient and
-a plain-text body. Attachments, search, and disconnect/revocation remain future
-work. Sign out ends the browser session but retains encrypted Gmail credentials
-and does not revoke the Google consent grant. This is a local prototype;
-deployment requires HTTPS, `COOKIE_SECURE=true`, configured DynamoDB storage,
-and the appropriate production proxy configuration.
+a plain-text body. Attachments and search remain future work. The single Sign out
+action revokes the Google grant,
+removes stored access, and invalidates all of that user's sessions. Failures are
+reported as incomplete, with the session and credentials preserved for retry.
+You must reconnect Gmail next time. If the session or credentials already expired,
+the UI directs the user to Google Account connections to remove any remaining grant.
+
+Production mode requires same-origin HTTPS URLs, Secure cookies, DynamoDB, Secrets
+Manager, and KMS on every host. Lambda always enforces production rules. Docker
+defaults to production; use APP_ENV=development explicitly for local/smoke runs.
+Production cookies use the __Host- prefix, and session tokens are hashed before
+storage. The security rollout notes describe the intentional session reset.
+
+Request quotas are shared through DynamoDB: 10 login starts per minute per direct
+peer, 30 mail reads per minute per user, and 5 sends per minute per user by default.
+Untrusted forwarding headers are ignored; an ingress proxy may therefore share a
+login quota across users. Add trusted edge/IP throttling and cost controls in AWS.
+Mail responses are capped at 2 MiB, POST bodies at 512 KiB, and message traversal
+is bounded. Large or complex mail should be opened in Gmail.
 
 Run without access logs so callback query strings containing authorization codes
 are not written to logs. No OAuth credentials belong in frontend environment files.
@@ -173,3 +199,6 @@ cd client
 npm.cmd run build
 npm.cmd run lint
 ```
+
+Security scanning remains a separate maintenance task; CodeBuild runs tests, lint,
+and smoke checks. See the security guide for known image findings before release.

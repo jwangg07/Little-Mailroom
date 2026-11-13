@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Callable
+from functools import partial
 
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request as GoogleRequest
@@ -68,7 +69,7 @@ class GoogleOAuth:
             stage = "id_token_verification"
             claims = id_token.verify_oauth2_token(
                 flow.credentials.id_token,
-                GoogleRequest(),
+                partial(GoogleRequest(), timeout=15),
                 self.settings.google_client_id,
             )
             stage = "identity_claims"

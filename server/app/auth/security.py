@@ -12,8 +12,22 @@ SESSION_COOKIE = "mailroom_session"
 STATE_COOKIE = "mailroom_oauth_state"
 
 
-def require_user(request: Request, store: AuthStore) -> User:
-    session_id = request.cookies.get(SESSION_COOKIE)
+def session_cookie(settings: Settings) -> str:
+    return (
+        "__Host-" + SESSION_COOKIE
+        if settings.app_env == "production"
+        else SESSION_COOKIE
+    )
+
+
+def state_cookie(settings: Settings) -> str:
+    return (
+        "__Host-" + STATE_COOKIE if settings.app_env == "production" else STATE_COOKIE
+    )
+
+
+def require_user(request: Request, store: AuthStore, settings: Settings) -> User:
+    session_id = request.cookies.get(session_cookie(settings))
     session = store.read_session(session_id, int(time.time())) if session_id else None
     if session is None:
         raise HTTPException(401, "Sign in to access your mail.")

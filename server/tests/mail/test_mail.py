@@ -1,6 +1,7 @@
 """Credential lifecycle and Gmail routes using fake Google/AWS boundaries."""
 
 import base64
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from email import policy
@@ -18,12 +19,20 @@ from google.auth.exceptions import RefreshError
 from app.application import create_app
 from app.auth.models import Session
 from app.auth.security import SESSION_COOKIE
-from app.auth.store import DynamoDBAuthStore, MemoryAuthStore
+from app.auth.store import CREDENTIAL_TTL, DynamoDBAuthStore, MemoryAuthStore
 from app.config import Settings
 from app.mail.credentials import PREFIX, GmailCredentials
 from app.mail.gmail_client import GmailClient
 from app.mail.service import GmailService
 from integrations.google.credential_vault import CredentialVault
+
+
+def provider_response(data):
+    response = Mock(status_code=200, ok=True)
+    response.iter_content.side_effect = lambda **kwargs: iter(
+        [json.dumps(data).encode()]
+    )
+    return response
 
 
 def credential(**overrides):
@@ -48,9 +57,7 @@ def setup(monkeypatch):
     session = Mock()
     session.__enter__ = Mock(return_value=session)
     session.__exit__ = Mock(return_value=False)
-    session.request.return_value = Mock(
-        status_code=200, ok=True, json=lambda: {"id": "abc123"}
-    )
+    session.request.return_value = provider_response({"id": "abc123"})
     monkeypatch.setattr("app.mail.gmail_client.requests.Session", lambda: session)
     return store, vault, service, session
 
@@ -70,7 +77,8 @@ def test_capture_preserves_refresh_token_and_tracks_actual_scopes(setup):
     assert exc.value.status_code == 409
 
 
-def test_dynamodb_credentials_have_no_session_ttl_and_conditional_refresh(monkeypatch):
+def test_dynamodb_credentials_have_retention_ttl_and_conditional_refresh(monkeypatch):
+    monkeypatch.setattr("app.auth.store.time.time", lambda: 1000)
     store = DynamoDBAuthStore("table")
     table = Mock()
     monkeypatch.setattr(store, "_table", lambda: table)
@@ -78,8 +86,11 @@ def test_dynamodb_credentials_have_no_session_ttl_and_conditional_refresh(monkey
     assert table.put_item.call_args.kwargs["Item"] == {
         "pk": "credentials#alice",
         "encrypted": "encrypted",
+        "expires_at": 1000 + CREDENTIAL_TTL,
     }
-    table.get_item.return_value = {"Item": {"encrypted": "encrypted"}}
+    table.get_item.return_value = {
+        "Item": {"encrypted": "encrypted", "expires_at": 1000 + CREDENTIAL_TTL}
+    }
     assert store.read_credentials("alice") == "encrypted"
     assert table.get_item.call_args.kwargs["ConsistentRead"]
     assert store.replace_credentials("alice", "encrypted", "new")
@@ -198,31 +209,40 @@ def test_send_creates_mime_and_never_retries_timeout(setup):
 
 def test_read_plain_text_not_html_and_list_pagination(setup):
     _, _, service, session = setup
-    raw = b"From: sender@example.com\r\nSubject: Hi\r\nContent-Type: multipart/alternative; boundary=x\r\n\r\n--x\r\nContent-Type: text/plain\r\n\r\nSafe text\r\n--x\r\nContent-Type: text/html\r\n\r\n<script>bad()</script>\r\n--x--"
-    session.request.return_value.json.return_value = {}  # replaced below with real response
-    session.request.return_value = Mock(
-        status_code=200,
-        ok=True,
-        json=lambda: {
+    session.request.return_value = provider_response(
+        {
             "id": "abc",
-            "raw": base64.urlsafe_b64encode(raw).decode().rstrip("="),
-        },
+            "payload": {
+                "mimeType": "multipart/alternative",
+                "parts": [
+                    {
+                        "mimeType": "text/plain",
+                        "body": {
+                            "data": base64.urlsafe_b64encode(b"Safe text").decode()
+                        },
+                    },
+                    {
+                        "mimeType": "text/html",
+                        "body": {
+                            "data": base64.urlsafe_b64encode(
+                                b"<script>bad()</script>"
+                            ).decode()
+                        },
+                    },
+                ],
+            },
+        }
     )
     assert service.message("alice", "abc")["body"].strip() == "Safe text"
+    assert session.request.call_args.kwargs["params"]["format"] == "full"
     session.request.side_effect = [
-        Mock(
-            status_code=200,
-            ok=True,
-            json=lambda: {"messages": [{"id": "abc"}], "nextPageToken": "next"},
-        ),
-        Mock(
-            status_code=200,
-            ok=True,
-            json=lambda: {
+        provider_response({"messages": [{"id": "abc"}], "nextPageToken": "next"}),
+        provider_response(
+            {
                 "id": "abc",
                 "labelIds": ["UNREAD"],
                 "payload": {"headers": [{"name": "Subject", "value": "Hello"}]},
-            },
+            }
         ),
     ]
     page = service.inbox("alice", "older")

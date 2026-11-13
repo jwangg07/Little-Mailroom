@@ -36,7 +36,7 @@ class GmailService:
             return mail_summary(message)
 
         with ThreadPoolExecutor(max_workers=5) as pool:
-            messages = list(pool.map(summary, page.get("messages", [])))
+            messages = list(pool.map(summary, page.get("messages", [])[:20]))
         return {"messages": messages, "nextPageToken": page.get("nextPageToken")}
 
     def message(self, user_id: str, message_id: str) -> dict:
@@ -44,7 +44,7 @@ class GmailService:
             user_id,
             "GET",
             "/messages/" + quote(message_id, safe=""),
-            params={"format": "raw"},
+            params={"format": "full"},
         )
         return mail_message(data)
 

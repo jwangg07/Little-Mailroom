@@ -15,6 +15,17 @@ from app.auth.security import SESSION_COOKIE, STATE_COOKIE
 from app.auth.store import DynamoDBAuthStore, MemoryAuthStore
 from app.config import Settings
 from integrations.google.client_secret import SecretUnavailableError
+from integrations.google.credential_vault import CredentialVault
+
+
+@pytest.fixture
+def revocation_http(monkeypatch):
+    http = Mock()
+    http.__enter__ = Mock(return_value=http)
+    http.__exit__ = Mock(return_value=False)
+    http.post.return_value = Mock(status_code=200)
+    monkeypatch.setattr("app.mail.credentials.requests.Session", lambda: http)
+    return http
 
 
 @pytest.fixture
@@ -103,7 +114,7 @@ def test_callback_requires_matching_browser_state(client, monkeypatch):
     fetch.assert_not_called()
 
 
-def test_success_session_replay_and_logout(client, monkeypatch):
+def test_success_session_replay_and_logout(client, monkeypatch, revocation_http):
     response, params, flow = complete_login(client, monkeypatch)
     assert response.headers["location"] == "http://localhost:5173/"
     flow.fetch_token.assert_called_once_with(code="test-code", timeout=15)
@@ -146,6 +157,7 @@ def test_success_session_replay_and_logout(client, monkeypatch):
     )
     client.cookies.set(SESSION_COOKIE, session_id)
     assert client.get("/auth/me").json() == {"user": None}
+    revocation_http.post.assert_called_once()
 
 
 @pytest.mark.parametrize("claims", [{"nonce": "wrong"}, {"email_verified": False}])
@@ -229,8 +241,10 @@ def test_smoke_routes_do_not_initialize_aws(monkeypatch):
     factory.assert_not_called()
 
 
-def test_shared_store_survives_app_replacement_and_logout(monkeypatch):
+def test_shared_store_survives_app_replacement_and_logout(monkeypatch, revocation_http):
     store = MemoryAuthStore()
+    vault = CredentialVault()
+    monkeypatch.setattr(main, "CredentialVault", lambda *args: vault)
     settings = Settings(
         _env_file=None,
         google_client_id="test-client.apps.googleusercontent.com",
@@ -318,7 +332,7 @@ def test_storage_failure_returns_safe_503_without_fallback(monkeypatch, caplog):
 )
 def test_lambda_rejects_memory_or_missing_table(monkeypatch, settings):
     monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "mini-mailroom")
-    with pytest.raises(RuntimeError, match="Lambda requires"):
+    with pytest.raises(RuntimeError, match="Production requires"):
         main.create_app(Settings(_env_file=None, **settings))
 
 
@@ -333,6 +347,8 @@ def test_lambda_configures_dynamodb_lazily(monkeypatch):
             google_client_secret_arn="arn:test",
             credential_kms_key_id="arn:kms:test",
             cookie_secure=True,
+            frontend_url="https://mailroom.example",
+            google_redirect_uri="https://mailroom.example/auth/google/callback",
         )
     )
     with TestClient(app) as browser:
@@ -450,5 +466,8 @@ def test_lambda_requires_secret_arn_and_secure_cookies(monkeypatch, overrides):
         "cookie_secure": True,
     }
     fields.update(overrides)
-    with pytest.raises(RuntimeError, match="Lambda requires GOOGLE_CLIENT_SECRET_ARN"):
+    with pytest.raises(
+        RuntimeError,
+        match="Production requires COOKIE_SECURE=true",
+    ):
         main.create_app(Settings(**fields))

@@ -151,6 +151,17 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
+.npmrc
+credentials*.json
+client_secret*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.tfstate
+*.tfstate.*
 .envrc
 .venv
 env/
@@ -221,6 +232,7 @@ __marimo__/
 
 private
 .tools/
+.security-tools/
 
 # Frontend source helpers are not Python build output.
 !client/src/lib/

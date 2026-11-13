@@ -5,7 +5,7 @@ export function getSession(signal: AbortSignal): Promise<Session> {
   return requestJson('/auth/me', { signal }, 'Account request failed')
 }
 
-export function logout(): Promise<Session> {
+export function logout(): Promise<{ user: null; revoked: boolean }> {
   return requestJson(
     '/auth/logout',
     {

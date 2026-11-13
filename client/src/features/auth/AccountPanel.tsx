@@ -5,6 +5,7 @@ type AccountPanelProps = {
   user: User | null
   loading: boolean
   signingOut: boolean
+  notice: string | null
   error: string | null
   signOut: () => Promise<void>
 }
@@ -13,6 +14,7 @@ export default function AccountPanel({
   user,
   loading,
   signingOut,
+  notice,
   error,
   signOut,
 }: AccountPanelProps) {
@@ -31,6 +33,7 @@ export default function AccountPanel({
           {error}
         </p>
       )}
+      {notice && <p className="note" role="status">{notice}</p>}
       {loading ? (
         <p role="status">Checking your account…</p>
       ) : user ? (
@@ -45,6 +48,10 @@ export default function AccountPanel({
           >
             {signingOut ? 'Signing out…' : 'Sign out'}
           </button>
+          <p className="note">
+            Signing out also disconnects Gmail and signs you out on other devices.
+            Your emails stay in Gmail. You will need to reconnect next time.
+          </p>
         </div>
       ) : (
         <>

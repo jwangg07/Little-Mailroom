@@ -25,8 +25,11 @@ code for Google/AWS. Dependencies are assembled explicitly in
    an existing refresh token when Google does not return a new one.
 4. The router saves a new session, revokes any previous browser session, sets the
    HttpOnly cookie, and redirects to the frontend. `useSession.signOut()` posts to
-   `/auth/logout`; the router checks the request origin and deletes session/state.
-   Sign out retains the encrypted Google grant.
+   `/auth/logout`; the router checks the request origin and current session.
+   The same action revokes the Google grant, rotates the user's session generation,
+   conditionally deletes the credential, and clears the browser cookies. A failed provider
+   revocation preserves the connection for retry; a concurrent credential change
+   produces a conflict rather than deleting newer data.
 
 ## Load the inbox and open a message
 
@@ -47,7 +50,8 @@ code for Google/AWS. Dependencies are assembled explicitly in
    conditional update so it cannot overwrite a newer login or refresh. HTTP errors
    become safe messages; a rejected 401 can refresh and retry once.
 5. `Mailbox.openMessage()` aborts any previous message request before loading
-   `/api/mail/messages/{id}`. The backend parses raw MIME and returns plain text;
+   `/api/mail/messages/{id}`. The backend selects plain text from Gmail's structured full message, skips
+   attachments, and limits response bytes and nesting;
    `MessageDetail` displays it as text without injecting email HTML.
 
 ## Send email
@@ -69,8 +73,17 @@ code for Google/AWS. Dependencies are assembled explicitly in
 - Settings load `server/.env` regardless of the current working directory.
   Built frontend assets remain at `client/dist` relative to the repository root.
 - Authentication records and encrypted credentials share the existing store;
-  records keep their existing keys and formats. Only sessions and pending logins
-  expire; encrypted Gmail credentials have no session TTL.
+  browser tokens are hashed into `session-v2#` keys, intentionally invalidating
+  old bearer-key sessions. A per-user generation marker invalidates sessions
+  across devices on sign-out. Credentials expire 30 days after capture/refresh;
+  login and session expiry are enforced independently of DynamoDB TTL cleanup.
+- `rate_limit.py` uses atomic DynamoDB counters (or bounded, locked local counters)
+  for login, callback, mail, send, and sign-out quotas. Source IPs are hashed;
+  forwarding headers are not trusted automatically. Memory stores prune expired
+  state and refuse unbounded growth.
+- `APP_ENV=production` validates deployment configuration on every host. Lambda
+  enforces it automatically. HTTP middleware bounds request bodies and adds
+  browser security headers. Strict CSP/HSTS and disabled API docs apply in production.
 - The client secret is retrieved lazily by
   [`GoogleClientSecret`](../server/integrations/google/client_secret.py), so
   anonymous health/account checks do not contact AWS.

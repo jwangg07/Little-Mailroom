@@ -29,7 +29,7 @@ phases:
         docker run --rm mini-mailroom-tests
         docker build --platform linux/amd64 --tag "$IMAGE_URI" .
         trap 'docker rm -f mailroom-smoke >/dev/null 2>&1 || true' EXIT
-        docker run --detach --name mailroom-smoke "$IMAGE_URI"
+        docker run --detach --name mailroom-smoke -e APP_ENV=development "$IMAGE_URI"
         healthy=false
         for attempt in {1..30}; do
           if docker exec mailroom-smoke python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()" >/dev/null 2>&1; then

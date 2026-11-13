@@ -21,3 +21,4 @@ class PendingLogin:
 class Session:
     user: User
     expires_at: int
+    generation: str = ""

@@ -18,3 +18,11 @@
 private
 docs
 .tools/
+.security-tools/
+**/credentials*.json
+**/client_secret*.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.tfstate*
